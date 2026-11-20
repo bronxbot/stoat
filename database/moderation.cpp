@@ -1202,6 +1202,370 @@ namespace bronx {
     return mysql_query(mysql_, sql.c_str()) == 0;
   }
 
+  std::optional<ModHistoryEntry> Database::get_moderation_case(const std::string &server_id, int id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return std::nullopt;
+
+    std::string sql = "SELECT id, action, moderator_id, target_id, COALESCE(reason,''), "
+                      "COALESCE(extra_details,''), COALESCE(channel_id,''), "
+                      "UNIX_TIMESTAMP(created_at) FROM moderation_logs "
+                      "WHERE server_id = '" + escape_string(server_id) + "' AND id = " + std::to_string(id);
+
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        MYSQL_ROW row = mysql_fetch_row(res);
+        if (row) {
+          ModHistoryEntry e;
+          e.id = row[0] ? std::stoi(row[0]) : 0;
+          e.action = row[1] ? row[1] : "";
+          e.moderator_id = row[2] ? row[2] : "";
+          e.target_id = row[3] ? row[3] : "";
+          e.reason = row[4] ? row[4] : "";
+          e.extra_details = row[5] ? row[5] : "";
+          e.channel_id = row[6] ? row[6] : "";
+          e.created_at = row[7] ? std::stoull(row[7]) : 0;
+          mysql_free_result(res);
+          return e;
+        }
+        mysql_free_result(res);
+      }
+    }
+    return std::nullopt;
+  }
+
+  bool Database::update_moderation_case_reason(const std::string &server_id, int id, const std::string &new_reason) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return false;
+
+    std::string sql = "UPDATE moderation_logs SET reason = '" + escape_string(new_reason) +
+                      "' WHERE server_id = '" + escape_string(server_id) + "' AND id = " + std::to_string(id);
+    return mysql_query(mysql_, sql.c_str()) == 0;
+  }
+
+  bool Database::add_moderation_note(const std::string &server_id, const std::string &target_id,
+                                     const std::string &moderator_id, const std::string &note) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return false;
+
+    std::string sql = "INSERT INTO moderation_notes (server_id, target_id, moderator_id, note) VALUES ('" +
+                      escape_string(server_id) + "', '" + escape_string(target_id) + "', '" +
+                      escape_string(moderator_id) + "', '" + escape_string(note) + "')";
+    return mysql_query(mysql_, sql.c_str()) == 0;
+  }
+
+  std::vector<ModNoteEntry> Database::get_moderation_notes(const std::string &server_id,
+                                                           const std::string &target_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    std::vector<ModNoteEntry> notes;
+    if (!mysql_)
+      return notes;
+
+    std::string sql = "SELECT id, server_id, target_id, moderator_id, note, UNIX_TIMESTAMP(created_at) "
+                      "FROM moderation_notes WHERE server_id = '" + escape_string(server_id) +
+                      "' AND target_id = '" + escape_string(target_id) + "' ORDER BY id DESC";
+
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+          ModNoteEntry n;
+          n.id = row[0] ? std::stoi(row[0]) : 0;
+          n.server_id = row[1] ? row[1] : "";
+          n.target_id = row[2] ? row[2] : "";
+          n.moderator_id = row[3] ? row[3] : "";
+          n.note = row[4] ? row[4] : "";
+          n.created_at = row[5] ? std::stoull(row[5]) : 0;
+          notes.push_back(n);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return notes;
+  }
+
+  bool Database::delete_moderation_note(const std::string &server_id, int id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return false;
+
+    std::string sql = "DELETE FROM moderation_notes WHERE server_id = '" + escape_string(server_id) +
+                      "' AND id = " + std::to_string(id);
+    return mysql_query(mysql_, sql.c_str()) == 0;
+  }
+
+  bool Database::update_moderation_note(const std::string &server_id, int id, const std::string &new_note) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return false;
+
+    std::string sql = "UPDATE moderation_notes SET note = '" + escape_string(new_note) +
+                      "' WHERE server_id = '" + escape_string(server_id) +
+                      "' AND id = " + std::to_string(id);
+    return mysql_query(mysql_, sql.c_str()) == 0;
+  }
+
+  int Database::get_user_message_count_period(const std::string &server_id, const std::string &user_id, int days) {
+    int pending_msgs = 0;
+    {
+      std::lock_guard<std::mutex> tlock(telemetry_mutex_);
+      auto it = pending_user_activity_.find(server_id + "\t" + user_id);
+      if (it != pending_user_activity_.end()) {
+        pending_msgs = it->second.messages;
+      }
+    }
+
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return pending_msgs;
+
+    int d = days > 0 ? days : 7;
+    std::string sql = "SELECT COALESCE(SUM(messages), 0) FROM guild_user_activity_daily "
+                      "WHERE guild_id = '" + escape_string(server_id) + "' AND user_id = '" +
+                      escape_string(user_id) + "' AND stat_date >= DATE_SUB(CURDATE(), INTERVAL " +
+                      std::to_string(d) + " DAY)";
+    int db_count = 0;
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        MYSQL_ROW row = mysql_fetch_row(res);
+        if (row && row[0]) {
+          try { db_count = std::stoi(row[0]); } catch (...) {}
+        }
+        mysql_free_result(res);
+      }
+    }
+    return db_count + pending_msgs;
+  }
+
+  bool Database::add_temp_role(const std::string &server_id, const std::string &user_id,
+                               const std::string &role_id, const std::string &assigned_by,
+                               uint64_t expires_at) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return false;
+
+    std::string del_sql = "DELETE FROM temp_roles WHERE server_id = '" + escape_string(server_id) +
+                          "' AND user_id = '" + escape_string(user_id) +
+                          "' AND role_id = '" + escape_string(role_id) + "'";
+    mysql_query(mysql_, del_sql.c_str());
+
+    std::string sql = "INSERT INTO temp_roles (server_id, user_id, role_id, assigned_by, expires_at) "
+                      "VALUES ('" + escape_string(server_id) + "', '" + escape_string(user_id) + "', '" +
+                      escape_string(role_id) + "', '" + escape_string(assigned_by) + "', " +
+                      std::to_string(expires_at) + ")";
+    return mysql_query(mysql_, sql.c_str()) == 0;
+  }
+
+  std::vector<TempRoleEntry> Database::get_expired_temp_roles(uint64_t now_unix) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    std::vector<TempRoleEntry> list;
+    if (!mysql_)
+      return list;
+
+    std::string sql = "SELECT id, server_id, user_id, role_id, assigned_by, expires_at FROM temp_roles "
+                      "WHERE expires_at <= " + std::to_string(now_unix) + " ORDER BY id ASC";
+
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+          TempRoleEntry t;
+          t.id = row[0] ? std::stoi(row[0]) : 0;
+          t.server_id = row[1] ? row[1] : "";
+          t.user_id = row[2] ? row[2] : "";
+          t.role_id = row[3] ? row[3] : "";
+          t.assigned_by = row[4] ? row[4] : "";
+          t.expires_at = row[5] ? std::stoull(row[5]) : 0;
+          list.push_back(t);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return list;
+  }
+
+  bool Database::remove_temp_role(int id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return false;
+
+    std::string sql = "DELETE FROM temp_roles WHERE id = " + std::to_string(id);
+    return mysql_query(mysql_, sql.c_str()) == 0;
+  }
+
+  bool Database::remove_user_temp_role(const std::string &server_id,
+                                       const std::string &user_id,
+                                       const std::string &role_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return false;
+
+    std::string sql = "DELETE FROM temp_roles WHERE server_id = '" +
+                      escape_string(server_id) + "' AND user_id = '" +
+                      escape_string(user_id) + "' AND role_id = '" +
+                      escape_string(role_id) + "'";
+    return mysql_query(mysql_, sql.c_str()) == 0 && mysql_affected_rows(mysql_) > 0;
+  }
+
+  std::vector<TempRoleEntry> Database::get_active_temp_roles(const std::string &server_id,
+                                                             const std::string &user_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    std::vector<TempRoleEntry> list;
+    if (!mysql_)
+      return list;
+
+    std::string sql = "SELECT id, server_id, user_id, role_id, assigned_by, expires_at FROM temp_roles "
+                      "WHERE server_id = '" + escape_string(server_id) + "'";
+    if (!user_id.empty()) {
+      sql += " AND user_id = '" + escape_string(user_id) + "'";
+    }
+    sql += " ORDER BY expires_at ASC";
+
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+          TempRoleEntry t;
+          t.id = row[0] ? std::stoi(row[0]) : 0;
+          t.server_id = row[1] ? row[1] : "";
+          t.user_id = row[2] ? row[2] : "";
+          t.role_id = row[3] ? row[3] : "";
+          t.assigned_by = row[4] ? row[4] : "";
+          t.expires_at = row[5] ? std::stoull(row[5]) : 0;
+          list.push_back(t);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return list;
+  }
+
+  bool Database::create_giveaway(const GiveawayEntry &g) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return false;
+
+    std::string sql = "INSERT INTO giveaways (message_id, channel_id, server_id, host_id, prize, winners_count, end_time, ended, required_role_id, min_level, min_messages, messages_days) "
+                      "VALUES ('" + escape_string(g.message_id) + "', '" + escape_string(g.channel_id) + "', '" +
+                      escape_string(g.server_id) + "', '" + escape_string(g.host_id) + "', '" +
+                      escape_string(g.prize) + "', " + std::to_string(g.winners_count) + ", " +
+                      std::to_string(g.end_time) + ", " + (g.ended ? "1" : "0") + ", '" +
+                      escape_string(g.required_role_id) + "', " + std::to_string(g.min_level) + ", " +
+                      std::to_string(g.min_messages) + ", " + std::to_string(g.messages_days) + ")";
+    return mysql_query(mysql_, sql.c_str()) == 0;
+  }
+
+  static GiveawayEntry parse_giveaway_row(MYSQL_ROW row) {
+    GiveawayEntry g;
+    g.id = row[0] ? std::stoi(row[0]) : 0;
+    g.message_id = row[1] ? row[1] : "";
+    g.channel_id = row[2] ? row[2] : "";
+    g.server_id = row[3] ? row[3] : "";
+    g.host_id = row[4] ? row[4] : "";
+    g.prize = row[5] ? row[5] : "";
+    g.winners_count = row[6] ? std::stoi(row[6]) : 1;
+    g.end_time = row[7] ? std::stoull(row[7]) : 0;
+    g.ended = row[8] ? (std::string(row[8]) == "1") : false;
+    g.required_role_id = row[9] ? row[9] : "";
+    g.min_level = row[10] ? std::stoi(row[10]) : 0;
+    g.min_messages = row[11] ? std::stoi(row[11]) : 0;
+    g.messages_days = row[12] ? std::stoi(row[12]) : 7;
+    return g;
+  }
+
+  std::optional<GiveawayEntry> Database::get_giveaway(const std::string &message_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return std::nullopt;
+
+    std::string sql = "SELECT id, message_id, channel_id, server_id, host_id, prize, winners_count, end_time, ended, required_role_id, min_level, min_messages, messages_days "
+                      "FROM giveaways WHERE message_id = '" + escape_string(message_id) + "'";
+
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        MYSQL_ROW row = mysql_fetch_row(res);
+        if (row) {
+          GiveawayEntry g = parse_giveaway_row(row);
+          mysql_free_result(res);
+          return g;
+        }
+        mysql_free_result(res);
+      }
+    }
+    return std::nullopt;
+  }
+
+  std::vector<GiveawayEntry> Database::get_due_giveaways(uint64_t now_unix) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    std::vector<GiveawayEntry> list;
+    if (!mysql_)
+      return list;
+
+    std::string sql = "SELECT id, message_id, channel_id, server_id, host_id, prize, winners_count, end_time, ended, required_role_id, min_level, min_messages, messages_days "
+                      "FROM giveaways WHERE ended = 0 AND end_time <= " + std::to_string(now_unix) + " ORDER BY end_time ASC";
+
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+          list.push_back(parse_giveaway_row(row));
+        }
+        mysql_free_result(res);
+      }
+    }
+    return list;
+  }
+
+  std::vector<GiveawayEntry> Database::get_active_giveaways(const std::string &server_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    std::vector<GiveawayEntry> list;
+    if (!mysql_)
+      return list;
+
+    std::string sql = "SELECT id, message_id, channel_id, server_id, host_id, prize, winners_count, end_time, ended, required_role_id, min_level, min_messages, messages_days "
+                      "FROM giveaways WHERE server_id = '" + escape_string(server_id) + "' AND ended = 0 ORDER BY end_time ASC";
+
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+          list.push_back(parse_giveaway_row(row));
+        }
+        mysql_free_result(res);
+      }
+    }
+    return list;
+  }
+
+  bool Database::end_giveaway(const std::string &message_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return false;
+
+    std::string sql = "UPDATE giveaways SET ended = 1 WHERE message_id = '" + escape_string(message_id) + "'";
+    return mysql_query(mysql_, sql.c_str()) == 0;
+  }
+
+  bool Database::delete_giveaway(const std::string &server_id, const std::string &message_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return false;
+
+    std::string sql = "DELETE FROM giveaways WHERE server_id = '" + escape_string(server_id) +
+                      "' AND message_id = '" + escape_string(message_id) + "'";
+    return mysql_query(mysql_, sql.c_str()) == 0 && mysql_affected_rows(mysql_) > 0;
+  }
+
   std::vector<ModLogEntry> Database::get_mod_logs(const std::string &server_id,
                                         const std::string &target_id,
                                         int limit) {

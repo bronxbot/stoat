@@ -1,0 +1,13 @@
+build/
+**/build/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/*.o
+**/*.a
+**/*.so
+**/.git/
+**/.cache/
+**/node_modules/
+client-desktop/
+website/
+bronx/_deps/

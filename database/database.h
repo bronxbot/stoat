@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <functional>
 #include <iostream>
@@ -10,6 +11,7 @@
 #include <random>
 #include <shared_mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -25,7 +27,22 @@ public:
   std::function<void(const std::string &, int64_t, int64_t)> on_balance_update = nullptr;
   std::function<void(const UserAFK &)> on_afk_save = nullptr;
 
-  ~Database() { if (mysql_) mysql_close(mysql_); }
+  ~Database() {
+    stop_telemetry_flusher();
+    if (mysql_) mysql_close(mysql_);
+  }
+
+  struct PendingUserActivity {
+    bool is_bot = false;
+    int messages = 0;
+    int edits = 0;
+    int deletes = 0;
+    int commands = 0;
+  };
+
+  void start_telemetry_flusher();
+  void stop_telemetry_flusher();
+  void flush_telemetry();
 
   // Nested type aliases for backward compatibility
   using AccountLink = ::bronx::AccountLink;
@@ -51,16 +68,19 @@ public:
   using CustomShopItem = ::bronx::CustomShopItem;
   using EconomyUser = ::bronx::EconomyUser;
   using GeoStats = ::bronx::GeoStats;
+  using GiveawayEntry = ::bronx::GiveawayEntry;
   using FishBaitEntry = ::bronx::FishBaitEntry;
   using FishBossState = ::bronx::FishBossState;
   using FishingUser = ::bronx::FishingUser;
   using GuildLevelingConfig = ::bronx::GuildLevelingConfig;
+  using GuildRole = ::bronx::GuildRole;
   using JailConfig = ::bronx::JailConfig;
   using LevelRole = ::bronx::LevelRole;
   using LoggingEmbed = ::bronx::LoggingEmbed;
   using MasqueradeConfig = ::bronx::MasqueradeConfig;
   using ModalInfo = ::bronx::ModalInfo;
   using ModHistoryEntry = ::bronx::ModHistoryEntry;
+  using ModNoteEntry = ::bronx::ModNoteEntry;
   using ModLogEntry = ::bronx::ModLogEntry;
   using RRMessage = ::bronx::RRMessage;
   using RRRule = ::bronx::RRRule;
@@ -68,6 +88,8 @@ public:
   using Reminder = ::bronx::Reminder;
   using RestrictionEntry = ::bronx::RestrictionEntry;
   using RobloxLink = ::bronx::RobloxLink;
+  using TempRoleEntry = ::bronx::TempRoleEntry;
+  using TicketNote = ::bronx::TicketNote;
   using RssFeed = ::bronx::RssFeed;
   using ServerCommandAlias = ::bronx::ServerCommandAlias;
   using ServerListing = ::bronx::ServerListing;
@@ -602,6 +624,38 @@ public:
 
   bool delete_moderation_action(const std::string &server_id, int id);
 
+  std::optional<ModHistoryEntry> get_moderation_case(const std::string &server_id, int id);
+
+  bool update_moderation_case_reason(const std::string &server_id, int id, const std::string &new_reason);
+
+  bool add_moderation_note(const std::string &server_id, const std::string &target_id,
+                           const std::string &moderator_id, const std::string &note);
+
+  std::vector<ModNoteEntry> get_moderation_notes(const std::string &server_id,
+                                                 const std::string &target_id);
+
+  bool delete_moderation_note(const std::string &server_id, int id);
+  bool update_moderation_note(const std::string &server_id, int id, const std::string &new_note);
+
+  int get_user_message_count_period(const std::string &server_id, const std::string &user_id, int days);
+
+  bool add_temp_role(const std::string &server_id, const std::string &user_id,
+                     const std::string &role_id, const std::string &assigned_by,
+                     uint64_t expires_at);
+  std::vector<TempRoleEntry> get_expired_temp_roles(uint64_t now_unix);
+  bool remove_temp_role(int id);
+  bool remove_user_temp_role(const std::string &server_id, const std::string &user_id,
+                             const std::string &role_id);
+  std::vector<TempRoleEntry> get_active_temp_roles(const std::string &server_id,
+                                                   const std::string &user_id = "");
+
+  bool create_giveaway(const GiveawayEntry &g);
+  std::optional<GiveawayEntry> get_giveaway(const std::string &message_id);
+  std::vector<GiveawayEntry> get_due_giveaways(uint64_t now_unix);
+  std::vector<GiveawayEntry> get_active_giveaways(const std::string &server_id);
+  bool end_giveaway(const std::string &message_id);
+  bool delete_giveaway(const std::string &server_id, const std::string &message_id);
+
   std::vector<ModLogEntry> get_mod_logs(const std::string &server_id,
                                         const std::string &target_id = "",
                                         int limit = 50);
@@ -961,6 +1015,7 @@ public:
   bool reload_autoresponders(const std::string &server_id);
   bool reload_autoreacts(const std::string &server_id);
   bool reload_disabled_items(const std::string &server_id);
+  bool reload_roles(const std::string &server_id);
 
   std::vector<LevelRole> get_level_roles(const std::string &server_id);
 
@@ -990,6 +1045,9 @@ public:
   bool add_xp(const std::string &user_id, uint64_t xp_amount,
               uint32_t &new_level, bool &leveled_up,
               const std::string &server_id);
+
+  bool set_user_xp(const std::string &user_id, const std::string &server_id,
+                   uint64_t total_xp, uint32_t level);
 
   bool reset_guild_xp(const std::string &server_id);
 
@@ -1234,6 +1292,13 @@ private:
   std::unordered_map<std::string, GuildLevelingConfig> leveling_config_cache_;
   std::shared_mutex leveling_config_cache_mutex_;
 
+  struct UserXPCacheEntry {
+    uint64_t total_xp = 0;
+    uint32_t level = 1;
+  };
+  std::unordered_map<std::string, UserXPCacheEntry> user_xp_cache_;
+  std::shared_mutex user_xp_cache_mutex_;
+
   std::unordered_map<std::string, std::vector<LevelRole>> level_roles_cache_;
   std::shared_mutex level_roles_cache_mutex_;
 
@@ -1243,6 +1308,13 @@ private:
 
   std::unordered_map<std::string, int> user_optout_cache_;
   std::shared_mutex user_optout_cache_mutex_;
+
+  std::mutex telemetry_mutex_;
+  std::unordered_map<std::string, PendingUserActivity> pending_user_activity_;
+  std::unordered_map<std::string, int> pending_channel_activity_;
+  std::unordered_map<std::string, std::pair<int, int>> pending_user_channel_activity_;
+  std::atomic<bool> telemetry_running_{false};
+  std::thread telemetry_flusher_thread_;
 
   bool init_tables();
   bool init_cache();

@@ -1,6 +1,7 @@
 #include "database.h"
 #include <mysql.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <mutex>
@@ -9,95 +10,178 @@
 #include <random>
 #include <shared_mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace bronx {
 
+  void Database::start_telemetry_flusher() {
+    if (telemetry_running_.exchange(true))
+      return;
+    telemetry_flusher_thread_ = std::thread([this]() {
+      while (telemetry_running_) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        if (!telemetry_running_)
+          break;
+        flush_telemetry();
+      }
+      flush_telemetry();
+    });
+  }
+
+  void Database::stop_telemetry_flusher() {
+    if (telemetry_running_.exchange(false)) {
+      if (telemetry_flusher_thread_.joinable()) {
+        telemetry_flusher_thread_.join();
+      }
+    }
+  }
+
+  void Database::flush_telemetry() {
+    std::unordered_map<std::string, PendingUserActivity> user_act;
+    std::unordered_map<std::string, int> ch_act;
+    std::unordered_map<std::string, std::pair<int, int>> user_ch_act;
+
+    {
+      std::lock_guard<std::mutex> lock(telemetry_mutex_);
+      if (pending_user_activity_.empty() && pending_channel_activity_.empty() &&
+          pending_user_channel_activity_.empty()) {
+        return;
+      }
+      user_act.swap(pending_user_activity_);
+      ch_act.swap(pending_channel_activity_);
+      user_ch_act.swap(pending_user_channel_activity_);
+    }
+
+    std::lock_guard<std::mutex> db_lock(db_mutex_);
+    if (!mysql_)
+      return;
+
+    for (const auto &[key, val] : user_act) {
+      auto tab_pos = key.find('\t');
+      if (tab_pos == std::string::npos)
+        continue;
+      std::string g_id = key.substr(0, tab_pos);
+      std::string u_id = key.substr(tab_pos + 1);
+
+      std::string sql =
+          "INSERT INTO guild_user_activity_daily (guild_id, user_id, "
+          "stat_date, is_bot, messages, edits, deletes, commands_used) "
+          "VALUES ('" +
+          escape_string(g_id) + "', '" + escape_string(u_id) + "', CURDATE(), " +
+          (val.is_bot ? "TRUE" : "FALSE") + ", " +
+          std::to_string(val.messages) + ", " + std::to_string(val.edits) +
+          ", " + std::to_string(val.deletes) + ", " +
+          std::to_string(val.commands) +
+          ") ON DUPLICATE KEY UPDATE "
+          "messages = messages + " + std::to_string(val.messages) +
+          ", edits = edits + " + std::to_string(val.edits) +
+          ", deletes = deletes + " + std::to_string(val.deletes) +
+          ", commands_used = commands_used + " + std::to_string(val.commands) +
+          ", is_bot = VALUES(is_bot)";
+      mysql_query(mysql_, sql.c_str());
+    }
+
+    for (const auto &[key, count] : ch_act) {
+      auto tab_pos = key.find('\t');
+      if (tab_pos == std::string::npos)
+        continue;
+      std::string g_id = key.substr(0, tab_pos);
+      std::string c_id = key.substr(tab_pos + 1);
+
+      std::string sql =
+          "INSERT INTO guild_channel_activity_daily (guild_id, channel_id, "
+          "stat_date, messages) VALUES ('" +
+          escape_string(g_id) + "', '" + escape_string(c_id) + "', CURDATE(), " +
+          std::to_string(count) +
+          ") ON DUPLICATE KEY UPDATE messages = messages + " +
+          std::to_string(count);
+      mysql_query(mysql_, sql.c_str());
+    }
+
+    for (const auto &[key, counts] : user_ch_act) {
+      auto p1 = key.find('\t');
+      if (p1 == std::string::npos)
+        continue;
+      auto p2 = key.find('\t', p1 + 1);
+      if (p2 == std::string::npos)
+        continue;
+      std::string g_id = key.substr(0, p1);
+      std::string c_id = key.substr(p1 + 1, p2 - (p1 + 1));
+      std::string u_id = key.substr(p2 + 1);
+
+      std::string sql =
+          "INSERT INTO guild_user_channel_activity_daily (guild_id, channel_id, "
+          "user_id, stat_date, messages, commands_used) VALUES ('" +
+          escape_string(g_id) + "', '" + escape_string(c_id) + "', '" +
+          escape_string(u_id) + "', CURDATE(), " +
+          std::to_string(counts.first) + ", " + std::to_string(counts.second) +
+          ") ON DUPLICATE KEY UPDATE messages = messages + " +
+          std::to_string(counts.first) +
+          ", commands_used = commands_used + " + std::to_string(counts.second);
+      mysql_query(mysql_, sql.c_str());
+    }
+  }
+
   bool Database::increment_user_daily_messages(const std::string &guild_id,
                                      const std::string &user_id, bool is_bot,
                                      const std::string &type) {
-    std::lock_guard<std::mutex> lock(db_mutex_);
-    if (!mysql_)
+    if (guild_id.empty() || user_id.empty())
       return false;
-    std::string col = "messages";
+    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+    auto &entry = pending_user_activity_[guild_id + "\t" + user_id];
+    entry.is_bot = is_bot;
     if (type == "edit")
-      col = "edits";
+      entry.edits++;
     else if (type == "delete")
-      col = "deletes";
-
-    std::string sql = "INSERT INTO guild_user_activity_daily (guild_id, "
-                      "user_id, stat_date, is_bot, " +
-                      col + ") VALUES ('" + escape_string(guild_id) + "', '" +
-                      escape_string(user_id) + "', CURDATE(), " +
-                      (is_bot ? "TRUE" : "FALSE") +
-                      ", 1) "
-                      "ON DUPLICATE KEY UPDATE " +
-                      col + " = " + col + " + 1, is_bot = VALUES(is_bot)";
-    return mysql_query(mysql_, sql.c_str()) == 0;
+      entry.deletes++;
+    else
+      entry.messages++;
+    return true;
   }
 
   bool Database::increment_user_daily_commands(const std::string &guild_id,
                                      const std::string &user_id, bool is_bot) {
-    std::lock_guard<std::mutex> lock(db_mutex_);
-    if (!mysql_)
+    if (guild_id.empty() || user_id.empty())
       return false;
-    std::string sql = "INSERT INTO guild_user_activity_daily (guild_id, "
-                      "user_id, stat_date, is_bot, commands_used) VALUES ('" +
-                      escape_string(guild_id) + "', '" +
-                      escape_string(user_id) + "', CURDATE(), " +
-                      (is_bot ? "TRUE" : "FALSE") +
-                      ", 1) "
-                      "ON DUPLICATE KEY UPDATE commands_used = commands_used + "
-                      "1, is_bot = VALUES(is_bot)";
-    return mysql_query(mysql_, sql.c_str()) == 0;
+    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+    auto &entry = pending_user_activity_[guild_id + "\t" + user_id];
+    entry.is_bot = is_bot;
+    entry.commands++;
+    return true;
   }
 
   bool Database::increment_channel_daily_messages(const std::string &guild_id,
                                         const std::string &channel_id) {
-    std::lock_guard<std::mutex> lock(db_mutex_);
-    if (!mysql_)
+    if (guild_id.empty() || channel_id.empty())
       return false;
-    std::string sql = "INSERT INTO guild_channel_activity_daily (guild_id, "
-                      "channel_id, stat_date, messages) VALUES ('" +
-                      escape_string(guild_id) + "', '" +
-                      escape_string(channel_id) +
-                      "', CURDATE(), 1) "
-                      "ON DUPLICATE KEY UPDATE messages = messages + 1";
-    return mysql_query(mysql_, sql.c_str()) == 0;
+    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+    pending_channel_activity_[guild_id + "\t" + channel_id]++;
+    return true;
   }
 
   bool Database::increment_user_channel_messages(const std::string &guild_id,
                                        const std::string &channel_id,
                                        const std::string &user_id) {
-    std::lock_guard<std::mutex> lock(db_mutex_);
-    if (!mysql_)
+    if (guild_id.empty() || channel_id.empty() || user_id.empty())
       return false;
-    std::string sql =
-        "INSERT INTO guild_user_channel_activity_daily (guild_id, channel_id, "
-        "user_id, stat_date, messages) VALUES ('" +
-        escape_string(guild_id) + "', '" + escape_string(channel_id) + "', '" +
-        escape_string(user_id) +
-        "', CURDATE(), 1) "
-        "ON DUPLICATE KEY UPDATE messages = messages + 1";
-    return mysql_query(mysql_, sql.c_str()) == 0;
+    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+    pending_user_channel_activity_[guild_id + "\t" + channel_id + "\t" + user_id]
+        .first++;
+    return true;
   }
 
   bool Database::increment_user_channel_commands(const std::string &guild_id,
                                        const std::string &channel_id,
                                        const std::string &user_id) {
-    std::lock_guard<std::mutex> lock(db_mutex_);
-    if (!mysql_)
+    if (guild_id.empty() || channel_id.empty() || user_id.empty())
       return false;
-    std::string sql =
-        "INSERT INTO guild_user_channel_activity_daily (guild_id, channel_id, "
-        "user_id, stat_date, commands_used) VALUES ('" +
-        escape_string(guild_id) + "', '" + escape_string(channel_id) + "', '" +
-        escape_string(user_id) +
-        "', CURDATE(), 1) "
-        "ON DUPLICATE KEY UPDATE commands_used = commands_used + 1";
-    return mysql_query(mysql_, sql.c_str()) == 0;
+    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+    pending_user_channel_activity_[guild_id + "\t" + channel_id + "\t" + user_id]
+        .second++;
+    return true;
   }
 
   bool Database::increment_guild_member_joins(const std::string &guild_id) {

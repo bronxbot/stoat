@@ -187,10 +187,10 @@ private:
 public:
     void register_handlers(stoatpp::cluster& bot) override {
 
-        // ── COMMAND: .antiraid / .ar ─────────────────────────────────────────
+        // ── COMMAND: .antiraid ───────────────────────────────────────────────
         bot.register_command({
             "antiraid",
-            {"ar"},
+            {},
             "manage server anti-raid protection settings.",
             "",
             {"<setup|status|join|spam|profile|enable|disable>"},
@@ -620,8 +620,7 @@ public:
                         "`.antiraid profile <action>` — action on default-profile accounts\n"
                         "`.antiraid reset` — reset all settings to defaults\n\n"
                         "**Actions:** `ban`, `kick`, `timeout`, `warn`, `delete` (spam/mentions only), `none`\n"
-                        "**Multiple actions:** separate with commas, e.g. `delete,warn` or `kick,warn`\n"
-                        "**Alias:** `.ar`");
+                        "**Multiple actions:** separate with commas, e.g. `delete,warn` or `kick,warn`");
                 });
             },
             "AntiRaid",

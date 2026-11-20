@@ -38,6 +38,40 @@ static std::string apply_cc_tokens(std::string text, stoatpp::cluster& bot,
     replace_all(text, "{user.id}", user_id);
     replace_all(text, "{user}", display_name);
 
+    // Target tokens (resolve from first argument if given or user mention)
+    std::string target_mention = user_mention;
+    std::string target_name = user_name;
+    std::string target_id = user_id;
+    if (!cmd_args.empty()) {
+        std::string cand = cmd_args[0];
+        if (cand.rfind("<@", 0) == 0 && cand.back() == '>') {
+            cand = cand.substr(2, cand.size() - 3);
+        }
+        auto target_usr = bot.get_user(cand);
+        if (target_usr) {
+            target_id = target_usr->id;
+            target_name = target_usr->username;
+            target_mention = "<@" + target_usr->id + ">";
+        } else if (cand.size() == 26) {
+            target_id = cand;
+            target_mention = "<@" + cand + ">";
+            target_name = cand;
+        }
+    }
+    replace_all(text, "{target.mention}", target_mention);
+    replace_all(text, "{target.name}", target_name);
+    replace_all(text, "{target.id}", target_id);
+    replace_all(text, "{target}", target_mention);
+
+    // Avatar tokens
+    std::string user_avatar = "";
+    auto usr_obj = bot.get_user(msg.author.id);
+    if (usr_obj && usr_obj->avatar.has_value() && !usr_obj->avatar->empty()) {
+        user_avatar = "https://cdn.stoatusercontent.com/avatars/" + *usr_obj->avatar;
+    }
+    replace_all(text, "{user.avatar}", user_avatar);
+    replace_all(text, "{avatar}", user_avatar);
+
     // Server tokens
     std::string server_name = "Server";
     std::string server_id = msg.server_id;
@@ -68,6 +102,7 @@ static std::string apply_cc_tokens(std::string text, stoatpp::cluster& bot,
     }
     replace_all(text, "{channel.mention}", "<#" + msg.channel_id + ">");
     replace_all(text, "{channel.id}", msg.channel_id);
+    replace_all(text, "{channel.name}", channel_name);
     replace_all(text, "{channel}", channel_name);
 
     // Args tokens
@@ -78,14 +113,10 @@ static std::string apply_cc_tokens(std::string text, stoatpp::cluster& bot,
     }
     replace_all(text, "{args}", full_args);
 
-    for (size_t i = 0; i < cmd_args.size(); ++i) {
-        std::string token = "{args[" + std::to_string(i) + "]}";
-        replace_all(text, token, cmd_args[i]);
-    }
-    // Clean remaining un-filled {args[N]}
-    for (size_t i = cmd_args.size(); i < 10; ++i) {
-        std::string token = "{args[" + std::to_string(i) + "]}";
-        replace_all(text, token, "");
+    for (size_t i = 0; i < 10; ++i) {
+        std::string val = (i < cmd_args.size()) ? cmd_args[i] : "";
+        replace_all(text, "{args[" + std::to_string(i) + "]}", val);
+        replace_all(text, "{arg:" + std::to_string(i + 1) + "}", val);
     }
 
     // Misc tokens
@@ -101,6 +132,35 @@ static std::string apply_cc_tokens(std::string text, stoatpp::cluster& bot,
     upstr += std::to_string(ups) + "s";
     replace_all(text, "{uptime}", upstr);
     replace_all(text, "{ping}", std::to_string(bot.ping_latency()) + "ms");
+
+    // Range / Roll token: {range: min, max} or {roll: min, max}
+    size_t range_pos = 0;
+    while ((range_pos = text.find("{range:", range_pos)) != std::string::npos ||
+           (range_pos = text.find("{roll:", range_pos)) != std::string::npos) {
+        size_t end_pos = text.find('}', range_pos);
+        if (end_pos == std::string::npos) break;
+        size_t colon_pos = text.find(':', range_pos);
+        std::string inner = text.substr(colon_pos + 1, end_pos - (colon_pos + 1));
+        int min_val = 1, max_val = 100;
+        size_t comma = inner.find(',');
+        if (comma != std::string::npos) {
+            try {
+                min_val = std::stoi(inner.substr(0, comma));
+                max_val = std::stoi(inner.substr(comma + 1));
+            } catch (...) {}
+        } else {
+            try { max_val = std::stoi(inner); } catch (...) {}
+        }
+        if (min_val > max_val) std::swap(min_val, max_val);
+        static std::random_device rd_range;
+        static std::mt19937 gen_range(rd_range());
+        std::uniform_int_distribution<int> dist_range(min_val, max_val);
+        std::string roll_str = std::to_string(dist_range(gen_range));
+        text.replace(range_pos, (end_pos + 1) - range_pos, roll_str);
+    }
+
+    // Support {choose: ...} alias for {random: ...}
+    replace_all(text, "{choose:", "{random:");
 
     // Random choice token: {random: choice1 | choice2 | choice3}
     size_t rand_pos = 0;

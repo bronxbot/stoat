@@ -706,7 +706,7 @@ public:
         // russianroulette command
         bot.register_command({
             "russianroulette",
-            {"rr", "rroulette"},
+            {"rroulette"},
             "plays a thrilling game of russian roulette against a user or the dealer.",
             "russianroulette <amount/fun> [@user]",
             {"<amount>", "[user]"},

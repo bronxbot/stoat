@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
@@ -51,6 +52,16 @@ static std::string get_primary_host_ip() {
   return found_ip.empty() ? "127.0.0.1" : found_ip;
 }
 
+static stoatpp::cluster *g_bot_ptr = nullptr;
+
+static void handle_shutdown_signal(int sig) {
+  std::cout << "\n[bronx] received signal " << sig
+            << ", shutting down cluster gracefully...\n";
+  if (g_bot_ptr) {
+    g_bot_ptr->stop();
+  }
+}
+
 // Include our Cogs
 #include "cogs/afk.h"
 #include "cogs/alias.h"
@@ -68,6 +79,7 @@ static std::string get_primary_host_ip() {
 #include "cogs/fishing.h"
 #include "cogs/games.h"
 #include "cogs/geoguessr.h"
+#include "cogs/giveaway.h"
 #include "cogs/general.h"
 #include "cogs/help.h"
 #include "cogs/history.h"
@@ -365,6 +377,9 @@ void start_reload_server() {
                 bronx::g_db->reload_disabled_items(server_id);
                 bronx::g_db->reload_custom_commands(server_id);
               }
+              if (module == "roles" || module == "all") {
+                bronx::g_db->reload_roles(server_id);
+              }
             }
           }
         }
@@ -653,6 +668,9 @@ int main(int argc, char *argv[]) {
   std::cout << "        owner id: " << cfg.owner_id << "\n";
 
   stoatpp::cluster bot(token, cfg);
+  g_bot_ptr = &bot;
+  std::signal(SIGINT, handle_shutdown_signal);
+  std::signal(SIGTERM, handle_shutdown_signal);
 
   // Register our Cogs/Modules
   bot.use(std::make_unique<bronx::cogs::HelpModule>());
@@ -680,6 +698,7 @@ int main(int argc, char *argv[]) {
   bot.use(std::make_unique<bronx::cogs::MultiSpamModule>());
   bot.use(std::make_unique<bronx::cogs::AutoModule>());
   bot.use(std::make_unique<bronx::cogs::TicketsModule>());
+  bot.use(std::make_unique<bronx::cogs::GiveawayModule>());
   bot.use(std::make_unique<bronx::cogs::ApplicationsModule>());
   bot.use(std::make_unique<bronx::cogs::ServerListModule>());
   bot.use(std::make_unique<bronx::cogs::CountingModule>());
@@ -897,6 +916,20 @@ int main(int argc, char *argv[]) {
     }
 
     // Background user & member caching across all servers on startup
+    static std::atomic<bool> s_caching_in_progress{false};
+    static std::chrono::steady_clock::time_point s_last_cache_time{};
+
+    auto now = std::chrono::steady_clock::now();
+    if (s_last_cache_time.time_since_epoch().count() != 0 &&
+        std::chrono::duration_cast<std::chrono::hours>(now - s_last_cache_time).count() < 6) {
+      std::cout << "\033[1;35m[bronx cache]\033[0m member cache already populated within 6h, skipping.\n";
+      return;
+    }
+    if (s_caching_in_progress.exchange(true)) {
+      std::cout << "\033[1;35m[bronx cache]\033[0m member cache fetch already running in background, skipping.\n";
+      return;
+    }
+
     std::thread([&bot, servers = e.servers]() {
       std::cout << "\033[1;35m[bronx cache]\033[0m starting background fetch "
                    "to cache all server members and users...\n";
@@ -932,6 +965,8 @@ int main(int argc, char *argv[]) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
       }
+      s_last_cache_time = std::chrono::steady_clock::now();
+      s_caching_in_progress.store(false);
       std::cout << "\033[1;35m[bronx cache]\033[0m finished caching all server "
                    "users & members! total users cached: "
                 << total_cached_users
@@ -1805,6 +1840,34 @@ int main(int argc, char *argv[]) {
     std::transform(mod_name.begin(), mod_name.end(), mod_name.begin(),
                    ::tolower);
 
+    if (cmd_name == "shop" && !args.empty()) {
+      std::vector<std::string> shop_args = args;
+      for (auto &arg : shop_args) {
+        std::transform(arg.begin(), arg.end(), arg.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+      }
+
+      if (shop_args[0] == "general" || shop_args[0] == "items" ||
+          shop_args[0] == "economy") {
+        cmd_name = "generalshop";
+      } else if (shop_args[0] == "fishing" || shop_args[0] == "fish" ||
+                 shop_args[0] == "tackle") {
+        cmd_name = "fish";
+      } else if (shop_args[0] == "event" || shop_args[0] == "events") {
+        cmd_name = "event";
+      } else if (shop_args[0] == "buy" && shop_args.size() >= 2) {
+        if (shop_args[1] == "general" || shop_args[1] == "items" ||
+            shop_args[1] == "economy") {
+          cmd_name = "buyitem";
+        } else if (shop_args[1] == "fishing" || shop_args[1] == "fish") {
+          cmd_name = "fish";
+        } else if (shop_args[1] == "event" || shop_args[1] == "events") {
+          cmd_name = "event";
+        }
+      }
+      mod_name = "economy";
+    }
+
     // 1. Completely Disabled Commands/Modules Check (ignores invocation
     // completely)
     if (bronx::g_db->is_disabled(msg.server_id, cmd_name, mod_name)) {
@@ -1984,5 +2047,6 @@ int main(int argc, char *argv[]) {
       << "[bronx] starting cluster start() loop. press ctrl+c to terminate.\n";
   bot.start();
 
+  std::cout << "[bronx] cluster stopped cleanly. bot exiting.\n";
   return 0;
 }

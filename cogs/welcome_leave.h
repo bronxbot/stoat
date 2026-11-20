@@ -1433,10 +1433,166 @@ public:
             {"setup", "channel <#channel|none>", "type <text|embed>", "message <text...>", "edit <key:val...>", "json <raw_json>", "test"}
         });
 
+        // --- AUTOROLE COMMAND ---
+        bot.register_command({
+            "autorole",
+            {"joinrole"},
+            "manage the server's join autorole.",
+            "autorole [role|off]",
+            {"[role|off]"},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " This command can only be used in a server channel.");
+                    return;
+                }
+
+                if (!g_db) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Database is unavailable.");
+                    return;
+                }
+
+                auto config = g_db->get_welcome_leave_config(msg.server_id).value_or(Database::WelcomeLeaveConfig{msg.server_id});
+
+                if (args.empty()) {
+                    if (config.autorole_role_id.empty()) {
+                        bot.send_message(msg.channel_id, "ℹ️ No autorole is currently configured.\nUse `" + (msg.prefix.empty() ? "." : msg.prefix) + "autorole <role>` to set one.");
+                    } else {
+                        std::string role_display = config.autorole_role_id;
+                        auto srv_res = bot.rest().get_server(msg.server_id);
+                        if (srv_res.success() && srv_res.body.contains("roles") && srv_res.body["roles"].is_object()) {
+                            if (srv_res.body["roles"].contains(config.autorole_role_id)) {
+                                auto r = srv_res.body["roles"][config.autorole_role_id];
+                                if (r.contains("name")) role_display = r["name"].get<std::string>();
+                            }
+                        }
+                        bot.send_message(msg.channel_id, "🛡️ Current autorole: **" + role_display + "** (`" + config.autorole_role_id + "`)\nUse `" + (msg.prefix.empty() ? "." : msg.prefix) + "autorole off` to disable.");
+                    }
+                    return;
+                }
+
+                bot.fetch_member(msg.server_id, msg.author.id, [&bot, msg, args, config](stoatpp::models::Member member, bool success) {
+                    if (!success) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to verify your permissions.");
+                        return;
+                    }
+                    if (!is_user_trusted_or_owner(bot, msg.server_id, msg.author.id, member)) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Permission error: you need Manage Server permission to configure autorole.");
+                        return;
+                    }
+
+                    std::string target = "";
+                    for (size_t i = 0; i < args.size(); ++i) {
+                        if (i > 0) target += " ";
+                        target += args[i];
+                    }
+
+                    if (target.rfind("<%", 0) == 0 && target.back() == '>') {
+                        target = target.substr(2, target.size() - 3);
+                    }
+
+                    if (target == "none" || target == "clear" || target == "null" || target == "off" || target == "disable") {
+                        auto save_cfg = config;
+                        save_cfg.autorole_role_id = "";
+                        if (g_db->save_welcome_leave_config(save_cfg)) {
+                            bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Autorole disabled for this server.");
+                        } else {
+                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration.");
+                        }
+                        return;
+                    }
+
+                    auto server_roles_res = bot.rest().get_server(msg.server_id);
+                    if (!server_roles_res.success()) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to fetch server roles.");
+                        return;
+                    }
+
+                    auto server_obj = server_roles_res.body;
+                    std::vector<std::pair<std::string, std::string>> matching_roles;
+                    if (server_obj.contains("roles") && server_obj["roles"].is_object()) {
+                        for (auto& [role_id, role_json] : server_obj["roles"].items()) {
+                            std::string role_name = role_json.contains("name") ? role_json["name"].get<std::string>() : "";
+                            
+                            std::string norm_target = target;
+                            std::string norm_name = role_name;
+                            std::string norm_id = role_id;
+                            std::transform(norm_target.begin(), norm_target.end(), norm_target.begin(), ::tolower);
+                            std::transform(norm_name.begin(), norm_name.end(), norm_name.begin(), ::tolower);
+                            std::transform(norm_id.begin(), norm_id.end(), norm_id.begin(), ::tolower);
+
+                            if (norm_id == norm_target || norm_name == norm_target) {
+                                matching_roles.clear();
+                                matching_roles.push_back({role_id, role_name});
+                                break;
+                            }
+
+                            if (norm_name.find(norm_target) != std::string::npos) {
+                                matching_roles.push_back({role_id, role_name});
+                            }
+                        }
+                    }
+
+                    if (matching_roles.empty()) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " No roles matching `" + target + "` found.");
+                        return;
+                    }
+
+                    auto save_cfg = config;
+                    save_cfg.autorole_role_id = matching_roles[0].first;
+                    if (g_db->save_welcome_leave_config(save_cfg)) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Autorole successfully set to **" + matching_roles[0].second + "** (`" + matching_roles[0].first + "`).");
+                    } else {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to save configuration.");
+                    }
+                });
+            },
+            "Moderation"
+        });
+
         // --- GATEWAY MEMBER JOIN HOOK ---
         bot.on_server_member_join([&bot](const stoatpp::events::ServerMemberJoin& e) {
             if (e.user_id == bot.current_user().id) return;
             if (g_db) g_db->increment_guild_member_joins(e.server_id);
+
+            // Sticky Roles Enforcement: re-apply jail role if user rejoins while jailed
+            if (g_db) {
+                auto active_jail = g_db->get_active_jail(e.server_id, e.user_id);
+                if (active_jail) {
+                    auto jail_cfg = g_db->get_jail_config(e.server_id);
+                    if (jail_cfg && !jail_cfg->jail_role_id.empty()) {
+                        std::cout << "[bronx sticky] user " << e.user_id << " rejoined " << e.server_id
+                                  << " while jailed! Re-applying jail role...\n";
+                        nlohmann::json edit_fields;
+                        edit_fields["roles"] = { jail_cfg->jail_role_id };
+                        bot.rest().edit_member(e.server_id, e.user_id, edit_fields);
+                        return; // Prevent normal autorole/welcome for evasion rejoiners
+                    }
+                }
+
+                // Sticky Temporary Roles: re-apply active unexpired temporary roles on rejoin
+                auto active_trs = g_db->get_active_temp_roles(e.server_id, e.user_id);
+                if (!active_trs.empty()) {
+                    auto now_unix = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+                    std::vector<std::string> due_restore_roles;
+                    for (const auto& tr : active_trs) {
+                        if (tr.expires_at > now_unix) {
+                            due_restore_roles.push_back(tr.role_id);
+                        }
+                    }
+                    if (!due_restore_roles.empty()) {
+                        // Sequential callback chain avoids overlapping GET+PATCH races across concurrent add_role_to_member calls
+                        auto apply_next = std::make_shared<std::function<void(size_t)>>();
+                        *apply_next = [&bot, e, due_restore_roles, apply_next](size_t idx) {
+                            if (idx >= due_restore_roles.size()) return;
+                            bot.add_role_to_member(e.server_id, e.user_id, due_restore_roles[idx], [apply_next, idx](bool, std::string) {
+                                (*apply_next)(idx + 1);
+                            });
+                        };
+                        (*apply_next)(0);
+                    }
+                }
+            }
 
             auto config_opt = g_db->get_welcome_leave_config(e.server_id);
             if (!config_opt) return;

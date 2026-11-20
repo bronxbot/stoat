@@ -74,6 +74,7 @@ public:
     int current_page = 0;
     int max_pages = 7;
     std::string user_id;
+    std::string prefix = ".";
   };
 
   struct BossSession {
@@ -415,6 +416,18 @@ public:
              std::to_string(seconds % 60) + "s";
     }
     return std::to_string(seconds) + "s";
+  }
+
+  static std::string format_mult(double val) {
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(2) << val;
+    std::string s = ss.str();
+    if (s.find('.') != std::string::npos) {
+      while (s.back() == '0' && s[s.length() - 2] != '.') {
+        s.pop_back();
+      }
+    }
+    return s;
   }
 
   // Levenshtein distance for fuzzy string matching
@@ -779,7 +792,7 @@ public:
     std::string desc =
         "Your Balance: **" + std::to_string(tokens) +
         " Event Tokens** 🎫\n"
-        "Use `.fish event buy <item_id>` to purchase items:\n\n"
+        "Buy with `.shop buy event <item_id>`:\n\n"
         "🐾 **EVENT PETS:**\n"
         "• `baby_otter` — **Baby River Otter** 🦦 (25 Tokens) — *+0.5x Luck*\n"
         "• `sun_turtle` — **Golden Sun Turtle** 🐢 (50 Tokens) — *+0.5x Rarity "
@@ -953,13 +966,16 @@ public:
       return "pets";
     if (lower_in == "event" || lower_in == "eventshop" || lower_in == "events")
       return "event";
+    if (lower_in == "token" || lower_in == "tokens")
+      return "tokens";
     if (lower_in == "gift" || lower_in == "send" || lower_in == "trade" ||
         lower_in == "transfer" || lower_in == "give")
       return "gift";
 
     std::vector<std::string> subcommands = {
         "cast", "bucket",   "sell", "shop", "buy",  "equip", "bait", "upgrade",
-        "rod",  "prestige", "flex", "top",  "boss", "pets",  "event", "gift"};
+        "rod",  "prestige", "flex", "top",  "boss", "pets",  "event", "tokens",
+        "gift"};
     return fuzzy_match_str(lower_in, subcommands);
   }
 
@@ -1124,7 +1140,8 @@ public:
   }
 
   // Interactive Shop Paginator Renderer (7 Total Pages)
-  stoatpp::models::MessagePayload render_shop_page(int page_idx) {
+  stoatpp::models::MessagePayload render_shop_page(
+      int page_idx, const std::string &prefix = ".") {
     if (page_idx < 0)
       page_idx = 0;
     if (page_idx >= 7)
@@ -1136,7 +1153,8 @@ public:
 
     std::string footer_nav =
         "\n\n*Page " + std::to_string(page_idx + 1) +
-        " of 7 | React ◀ ▶ to navigate or type `.shop <1-7/category>`*";
+        " of 7 | React ◀ ▶ to navigate or type `" + prefix +
+        "shop fishing <1-7/category>`*";
 
     // Separate standard baits into 2 groups
     std::vector<BaitDef> std_baits;
@@ -1151,7 +1169,8 @@ public:
     if (page_idx == 0) {
       embed.set_colour(0x3498DB);
       embed.set_title("🛒 Bronx Shop — 🎣 Standard Rods (Part 1/2)");
-      std::string desc = "Use `.fish buy <rod_id>` to purchase:\n\n";
+      std::string desc = "Buy with `" + prefix +
+                         "shop buy fishing <rod_id>`:\n\n";
       for (size_t i = 0; i < 6 && i < rods_.size(); ++i) {
         const auto &r = rods_[i];
         if (r.req_prestige > 0)
@@ -1161,7 +1180,7 @@ public:
         desc += "`" + r.id + "` — **" + r.name + "** (" + price +
                 ")\n"
                 "   Luck: **" +
-                std::to_string(r.luck_mult) + "x** | CD: **" +
+                format_mult(r.luck_mult) + "x** | CD: **" +
                 std::to_string(r.base_cd) + "s** | Passive: *" +
                 r.passive_effect + "*\n";
       }
@@ -1170,7 +1189,8 @@ public:
     } else if (page_idx == 1) {
       embed.set_colour(0x3498DB);
       embed.set_title("🛒 Bronx Shop — 🎣 Standard Rods (Part 2/2)");
-      std::string desc = "Use `.fish buy <rod_id>` to purchase:\n\n";
+      std::string desc = "Buy with `" + prefix +
+                         "shop buy fishing <rod_id>`:\n\n";
       for (size_t i = 6; i < 12 && i < rods_.size(); ++i) {
         const auto &r = rods_[i];
         if (r.req_prestige > 0)
@@ -1180,7 +1200,7 @@ public:
         desc += "`" + r.id + "` — **" + r.name + "** (" + price +
                 ")\n"
                 "   Luck: **" +
-                std::to_string(r.luck_mult) + "x** | CD: **" +
+                format_mult(r.luck_mult) + "x** | CD: **" +
                 std::to_string(r.base_cd) + "s** | Passive: *" +
                 r.passive_effect + "*\n";
       }
@@ -1198,7 +1218,7 @@ public:
                 std::to_string(r.req_prestige) +
                 ")\n"
                 "   Luck: **" +
-                std::to_string(r.luck_mult) + "x** | CD: **" +
+                format_mult(r.luck_mult) + "x** | CD: **" +
                 std::to_string(r.base_cd) + "s** | Passive: *" +
                 r.passive_effect + "*\n";
       }
@@ -1207,8 +1227,8 @@ public:
     } else if (page_idx == 3) {
       embed.set_colour(0x2ECC71);
       embed.set_title("🛒 Bronx Shop — 🪱 Standard Baits (Part 1/2)");
-      std::string desc =
-          "Use `.fish buy <bait_id> [quantity]` to purchase:\n\n";
+      std::string desc = "Buy with `" + prefix +
+                         "shop buy fishing <bait_id> [quantity]`:\n\n";
       for (size_t i = 0; i < 5 && i < std_baits.size(); ++i) {
         const auto &b = std_baits[i];
         std::string price = std::to_string(b.cost) + " coins / pack of " +
@@ -1224,8 +1244,8 @@ public:
     } else if (page_idx == 4) {
       embed.set_colour(0x2ECC71);
       embed.set_title("🛒 Bronx Shop — 🪱 Standard Baits (Part 2/2)");
-      std::string desc =
-          "Use `.fish buy <bait_id> [quantity]` to purchase:\n\n";
+      std::string desc = "Buy with `" + prefix +
+                         "shop buy fishing <bait_id> [quantity]`:\n\n";
       for (size_t i = 5; i < 10 && i < std_baits.size(); ++i) {
         const auto &b = std_baits[i];
         std::string price = std::to_string(b.cost) + " coins / pack of " +
@@ -1270,7 +1290,7 @@ public:
                 ef.desc + "\n";
       }
       desc += "\n**ROD STAT UPGRADES:**\n"
-              "Use `.fish upgrade <stat>` to upgrade:\n"
+              "Use `" + prefix + "fish upgrade <stat>` to upgrade:\n"
               "• `luck` (+15% Luck/lvl) | `cooldown` (-1s CD/lvl)\n"
               "• `double` (+5% Double Catch/lvl) | `rare` (+10% Rare "
               "Multiplier/lvl)\n";
@@ -1285,7 +1305,8 @@ public:
 
   void open_shop_paginator(stoatpp::cluster &bot, const std::string &channel_id,
                            const std::string &author_id,
-                           const std::string &arg) {
+                           const std::string &arg,
+                           const std::string &prefix = ".") {
     int start_page = 0;
     std::string lower_arg = arg;
     std::transform(lower_arg.begin(), lower_arg.end(), lower_arg.begin(),
@@ -1301,22 +1322,26 @@ public:
           start_page = 0;
         else if (lower_arg == "prestige" || lower_arg == "prest")
           start_page = 2;
-        else if (lower_arg == "bait" || lower_arg == "baits")
+        else if (lower_arg == "bait" || lower_arg == "baits" ||
+                 lower_arg == "standard-bait")
           start_page = 3;
+        else if (lower_arg == "prestige-bait" || lower_arg == "token-bait")
+          start_page = 5;
         else if (lower_arg == "effect" || lower_arg == "effects" ||
-                 lower_arg == "enchant" || lower_arg == "upgrade")
+                 lower_arg == "enchant" || lower_arg == "enchants" ||
+                 lower_arg == "upgrade" || lower_arg == "upgrades")
           start_page = 6;
       }
     }
 
-    auto payload = render_shop_page(start_page);
+    auto payload = render_shop_page(start_page, prefix);
 
     bot.send_message(channel_id, payload,
-                     [this, start_page, author_id](stoatpp::models::Message res,
-                                                   bool success) {
+                     [this, start_page, author_id, prefix](stoatpp::models::Message res,
+                                                           bool success) {
                        if (success) {
                          std::lock_guard<std::mutex> lock(shop_mutex_);
-                         shop_sessions_[res.id] = {start_page, 7, author_id};
+                         shop_sessions_[res.id] = {start_page, 7, author_id, prefix};
                        }
                      });
   }
@@ -1506,7 +1531,7 @@ public:
       }
     }
     if (!has_any_bait) {
-      desc += "*You do not own any bait. Visit `.shop` or `.tackle` to buy some!*\n";
+      desc += "*You do not own any bait. Visit `.shop fishing bait` to buy some!*\n";
     }
 
     embed.set_description(desc);
@@ -1527,14 +1552,86 @@ public:
       init_catalogs();
   }
 
+  bool route_fish(stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                  const std::vector<std::string> &args) {
+    for (const auto &cmd : bot.get_commands()) {
+      if (cmd.name == "fish") {
+        cmd.callback(bot, msg, args);
+        return true;
+      }
+    }
+    return false;
+  }
+
   void register_handlers(stoatpp::cluster &bot) override {
+    // Standalone .cast command
+    bot.register_command(
+        {"cast",
+         {"c"},
+         "casts your fishing line immediately.",
+         "cast",
+         {},
+         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                const std::vector<std::string> &args) {
+           std::vector<std::string> routed = {"cast"};
+           for (const auto &a : args) routed.push_back(a);
+           route_fish(bot, msg, routed);
+         },
+         "Economy"});
+
+    // Standalone .sell command
+    bot.register_command(
+        {"sell",
+         {"s"},
+         "sells your caught fish for coins (defaults to selling all).",
+         "sell [all/rarity]",
+         {"[rarity]"},
+         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                const std::vector<std::string> &args) {
+           std::vector<std::string> routed = {"sell"};
+           if (args.empty()) {
+             routed.push_back("all");
+           } else {
+             for (const auto &a : args) routed.push_back(a);
+           }
+           route_fish(bot, msg, routed);
+         },
+         "Economy"});
+
+    // Standalone .bucket command
+    bot.register_command(
+        {"bucket",
+         {"b", "fishbucket"},
+         "views the fish currently in your bucket.",
+         "bucket",
+         {},
+         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                const std::vector<std::string> &args) {
+           std::vector<std::string> routed = {"bucket"};
+           for (const auto &a : args) routed.push_back(a);
+           route_fish(bot, msg, routed);
+         },
+         "Economy"});
+
+    // Standalone .tokens command
+    bot.register_command(
+        {"tokens",
+         {"tok"},
+         "checks your fishing prestige token balance and perks.",
+         "tokens",
+         {},
+         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                const std::vector<std::string> &) {
+           route_fish(bot, msg, {"tokens"});
+         },
+         "Economy"});
     // Standalone .shop command alias
     // Standalone .profile command alias
     bot.register_command(
         {"profile",
          {"fishprofile", "fprofile"},
-         "shows your fishing profile, total catches, reels, money made, and "
-         "best fish!",
+         "shortcut for `.fish profile`: shows your fishing profile, total "
+         "catches, money made, and best fish.",
          "profile [@user]",
          {"[@user]"},
          [this, &bot](stoatpp::cluster &b, const stoatpp::events::Message &msg,
@@ -1550,7 +1647,7 @@ public:
     bot.register_command(
         {"equip",
          {"eq", "wield"},
-         "equip your unlocked rod or owned bait.",
+         "shortcut for `.fish equip`: equip your unlocked rod or owned bait.",
          "equip [item_id]",
          {"[item_id]"},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
@@ -1601,13 +1698,42 @@ public:
     bot.register_command(
         {"tackle",
          {},
-         "opens the Bronx fishing shop interactive paginator.",
+         "shortcut for `.shop fishing`: opens the fishing gear catalog.",
          "tackle [page/category]",
          {"[page/category]"},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
                 const std::vector<std::string> &args) {
            std::string arg = args.empty() ? "" : args[0];
-           open_shop_paginator(bot, msg.channel_id, msg.author.id, arg);
+           open_shop_paginator(bot, msg.channel_id, msg.author.id, arg,
+                               msg.prefix.empty() ? bot.config().command_prefix : msg.prefix);
+         },
+         "Economy"});
+
+    // Standalone .rods command alias
+    bot.register_command(
+        {"rods",
+         {"rod"},
+         "opens the fishing rod catalog in the shop.",
+         "rods [page]",
+         {"[page]"},
+         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                const std::vector<std::string> &args) {
+           open_shop_paginator(bot, msg.channel_id, msg.author.id, "rods",
+                               msg.prefix.empty() ? bot.config().command_prefix : msg.prefix);
+         },
+         "Economy"});
+
+    // Standalone .bait command alias
+    bot.register_command(
+        {"baits",
+         {"bait"},
+         "opens the bait catalog in the shop.",
+         "baits [page]",
+         {"[page]"},
+         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                const std::vector<std::string> &args) {
+           open_shop_paginator(bot, msg.channel_id, msg.author.id, "bait",
+                               msg.prefix.empty() ? bot.config().command_prefix : msg.prefix);
          },
          "Economy"});
 
@@ -1615,7 +1741,7 @@ public:
     bot.register_command(
         {"boss",
          {"fishboss", "bosses"},
-         "view active global passive fish bosses and team progress.",
+         "shortcut for `.fish boss`: view active global fishing bosses and team progress.",
          "boss [1-3/daily/monthly/seasonal]",
          {"[page]"},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
@@ -1629,7 +1755,7 @@ public:
     bot.register_command(
         {"pets",
          {"fishpets", "pet"},
-         "view and equip your unlocked fishing pet companions.",
+         "shortcut for `.fish pets`: view and equip your fishing companions.",
          "pets [equip/unequip] [pet_id]",
          {"[action]", "[pet_id]"},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
@@ -1672,8 +1798,7 @@ public:
     bot.register_command(
         {"event",
          {"eventshop", "eventbuy"},
-         "access the fishing event shop for exclusive pets and permanent "
-         "upgrades.",
+         "shortcut for `.fish event`: browse or buy event pets and permanent upgrades.",
          "event [buy] [item_id]",
          {"[action]", "[item_id]"},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
@@ -1794,6 +1919,7 @@ public:
       if (it_s != shop_sessions_.end()) {
         int page = it_s->second.current_page;
         int max_pages = it_s->second.max_pages;
+        std::string prefix = it_s->second.prefix;
 
         bool changed = false;
         if (e.emoji_id == "⏪" || e.emoji_id == "⏮" || e.emoji_id == "⏮️") {
@@ -1816,7 +1942,7 @@ public:
         if (changed) {
           shop_sessions_[e.id].current_page = page;
           lock.unlock();
-          auto payload = render_shop_page(page);
+          auto payload = render_shop_page(page, prefix);
           bot.edit_message(e.channel_id, e.id, payload, [&bot, e](auto, bool) {
             bot.unreact_from_message(e.channel_id, e.id, e.emoji_id, e.user_id);
           });
@@ -2379,11 +2505,11 @@ public:
     bot.register_command(
         {"fish",
          {"f", "fishing"},
-         "in-depth fishing economy game with rods, baits, effects, prestiges, "
-         "pets, global bosses, and odds flexing!",
+         "fishing command hub: cast, manage your catch and gear, check "
+         "prestige, view your profile, pets, events, or bosses.",
          "fish "
-         "[cast/bucket/sell/shop/buy/equip/bait/upgrade/rod/prestige/profile/"
-         "top/boss/pets/event]",
+         "[cast/bucket/sell/shop/buy/equip/bait/upgrade/rod/prestige/tokens/"
+         "profile/top/boss/pets/event/gift]",
          {"[subcommand]", "[args...]"},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
                 const std::vector<std::string> &args) {
@@ -2418,12 +2544,32 @@ public:
              // Check active bait quantity
              int bait_qty = g_db->get_bait_count(msg.author.id, u.bait_id);
              if (bait_qty <= 0) {
-               bot.send_message(msg.channel_id,
-                                "" + bronx::emj_no + " You have run out of your active bait (**" +
-                                    bait->name +
-                                    "**)! Use `.fish bait <bait_id>` or buy "
-                                    "more in `.fish shop`.");
-               return;
+               // Auto-fallback: check if the user has any other baits in their bag
+               auto owned_baits = g_db->get_user_baits(msg.author.id);
+               std::string fallback_id;
+               int fallback_qty = 0;
+               for (const auto &b : owned_baits) {
+                 if (b.quantity > 0 && b.bait_id != u.bait_id) {
+                   fallback_id = b.bait_id;
+                   fallback_qty = b.quantity;
+                   break;
+                 }
+               }
+
+               if (!fallback_id.empty()) {
+                 u.bait_id = fallback_id;
+                 g_db->update_fishing_user(u);
+                 bait = get_bait(fallback_id);
+                 bot.send_message(msg.channel_id,
+                                  "🪱 Ran out of previous bait! Auto-equipped **" +
+                                      bait->name + "** (" + std::to_string(fallback_qty) + " left).");
+               } else {
+                 std::string p = msg.prefix.empty() ? "." : msg.prefix;
+                 bot.send_message(msg.channel_id,
+                                  "" + bronx::emj_no + " You have run out of bait (**" +
+                                      bait->name + "**)! Buy more with `" + p + "buy worm 10` or check `" + p + "shop bait`.");
+                 return;
+               }
              }
 
              // Calculate effective cooldown
@@ -2791,7 +2937,8 @@ public:
            //  4. SHOP
            if (sub == "shop") {
              std::string arg = (args.size() > 1) ? args[1] : "";
-             open_shop_paginator(bot, msg.channel_id, msg.author.id, arg);
+             open_shop_paginator(bot, msg.channel_id, msg.author.id, arg,
+                                 msg.prefix.empty() ? bot.config().command_prefix : msg.prefix);
              return;
            }
 
@@ -2799,7 +2946,8 @@ public:
            if (sub == "buy") {
              if (args.size() < 2) {
                bot.send_message(msg.channel_id,
-                                "Usage: `.fish buy <item_id> [quantity]`");
+                                "Usage: `" + msg.prefix + "buy <item_id> [quantity]` or `" +
+                                msg.prefix + "shop buy <item_id> [quantity]`");
                return;
              }
 
@@ -2807,12 +2955,23 @@ public:
              int qty = 1;
              if (args.size() >= 3) {
                try {
-                 qty = std::stoi(args[2]);
-               } catch (...) {
+                 size_t parsed = 0;
+                 qty = std::stoi(args[2], &parsed);
+                 if (parsed != args[2].size() || qty <= 0) {
+                   bot.send_message(msg.channel_id,
+                                    "Quantity must be a positive whole number. "
+                                    "Usage: `" + msg.prefix + "shop buy fishing "
+                                    "<item_id> [quantity]`.");
+                   return;
+                 }
+               } catch (const std::exception &) {
+                 bot.send_message(msg.channel_id,
+                                  "Quantity must be a positive whole number. "
+                                  "Usage: `" + msg.prefix + "shop buy fishing "
+                                  "<item_id> [quantity]`.");
+                 return;
                }
              }
-             if (qty <= 0)
-               qty = 1;
 
              // Collect all shop item candidates for fuzzy match
              std::vector<std::string> item_candidates;
@@ -2962,7 +3121,7 @@ public:
 
              bot.send_message(msg.channel_id,
                               "" + bronx::emj_no + " Unknown item ID `" + raw_item_id +
-                                  "`. Check `.fish shop` for item IDs.");
+                                  "`. Check `" + msg.prefix + "shop fishing` for item IDs.");
              return;
            }
 
@@ -3159,7 +3318,7 @@ public:
              std::string desc = "Rod Tier: **" + r->name +
                                 "**\n"
                                 "Base Luck: **" +
-                                std::to_string(r->luck_mult) +
+                                format_mult(r->luck_mult) +
                                 "x**\n"
                                 "Base Cooldown: **" +
                                 std::to_string(r->base_cd) +
@@ -3218,6 +3377,28 @@ public:
                  bot.send_message(
                      msg.channel_id,
                      "" + bronx::emj_no + " You do not meet the Fishing Prestige requirements.");
+                 return;
+               }
+
+               if (sub == "tokens") {
+                 auto u_opt = g_db->get_fishing_user(msg.author.id);
+                 if (!u_opt) {
+                   bot.send_message(msg.channel_id,
+                                    "Could not retrieve your Fishing Token balance.");
+                   return;
+                 }
+
+                 bot.send_message(
+                     msg.channel_id,
+                     "🪙 **Prestige Tokens:** " +
+                         std::to_string(u_opt->prestige_tokens) +
+                         "\nSpend them on prestige rods with `" +
+                         bot.config().command_prefix +
+                         "fish shop prestige`, prestige bait on shop page 6, or "
+                         "rod enchants on page 7. Buy an item with `" +
+                         bot.config().command_prefix + "fish buy <item_id>`.\n"
+                         "Earn more by reaching Fishing Prestige tiers or catching "
+                         "Prestige Essence fish.");
                  return;
                }
 
@@ -3286,7 +3467,7 @@ public:
                                 "- Permanent **+25% Luck**\n"
                                 "- Unlocks Tier " +
                                 std::to_string(u.fish_prestige + 1) +
-                                " Prestige Rods & Baits in `.fish shop`!\n\n"
+                                " Prestige Rods & Baits in `.shop fishing prestige`!\n\n"
                                 "Type `.fish prestige confirm` to prestige!";
 
              embed.set_description(desc);
@@ -3630,13 +3811,14 @@ public:
 
             bot.send_message(msg.channel_id,
                              "Unknown subcommand. Usage: `.fish "
-                             "[cast/bucket/sell/shop/buy/equip/bait/upgrade/rod/prestige/profile/top/boss/pets/event/gift]`");
+                             "[cast/bucket/sell/shop/buy/equip/bait/upgrade/rod/prestige/tokens/profile/top/boss/pets/event/gift]`");
           },
           "Economy",
           0,
           0,
           {"cast", "bucket", "sell", "shop", "buy", "equip", "bait", "upgrade",
-           "rod", "prestige", "flex", "top", "boss", "pets", "event", "gift"}});
+           "rod", "prestige", "tokens", "flex", "top", "boss", "pets", "event",
+           "gift"}});
   }
 };
 

@@ -102,7 +102,9 @@ public:
                 if (!args.empty()) {
                     std::string sub = args[0];
                     std::transform(sub.begin(), sub.end(), sub.begin(), ::tolower);
-                    if (sub == "enable" || sub == "disable" || sub == "xprange" || sub == "role" || sub == "config") {
+                    if (sub == "enable" || sub == "disable" || sub == "xprange" || sub == "role" || sub == "config" ||
+                        sub == "setlevel" || sub == "setxp" || sub == "addxp" || sub == "removexp" ||
+                        sub == "resetuser" || sub == "blacklist" || sub == "ignore") {
                         is_admin_cmd = true;
                     } else if (sub == "edit" || sub == "customize") {
                         is_user_edit_cmd = true;
@@ -568,6 +570,7 @@ private:
 
                 // Send the rank card as attachment
                 stoatpp::models::MessagePayload payload;
+                payload.content = "📊 Rank card for " + username;
                 payload.add_attachment(file_id);
                 bot.send_message(channel_id, payload);
             }).detach();
@@ -621,7 +624,12 @@ private:
                 "• `" + pfx + "level config channel <#channel | here | none>` — Set level-up announcement channel.\n"
                 "• `" + pfx + "level config message <message...>` — Custom message (tokens: `{name}`, `{mention}`, `{level}`).\n"
                 "• `" + pfx + "level config reset` — Reset server leveling configuration.\n"
-                "• `" + pfx + "level config resetdata` — Clear all XP database records for the server."
+                "• `" + pfx + "level config resetdata` — Clear all XP database records for the server.\n"
+                "• `" + pfx + "level setlevel <@user> <level>` — Set a member's level (1–1000).\n"
+                "• `" + pfx + "level setxp <@user> <xp>` — Set a member's total XP.\n"
+                "• `" + pfx + "level addxp <@user> <xp>` / `removexp <@user> <xp>` — Adjust a member's XP.\n"
+                "• `" + pfx + "level resetuser <@user>` — Reset a member's XP in this server.\n"
+                "• `" + pfx + "level blacklist <list|add|remove> <channel|role|user> <target>` — Manage XP ignore list."
             );
         };
 
@@ -983,6 +991,174 @@ private:
                     bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Cleared all server members' XP data.");
                 } else {
                     bot.send_message(msg.channel_id, "" + bronx::emj_no + " Failed to clear XP data.");
+                }
+            }
+        }
+        else if (sub == "setlevel" || sub == "setxp" || sub == "addxp" || sub == "removexp") {
+            if (args.size() < 3) {
+                bot.send_message(msg.channel_id, "usage: `" + pfx + "level " + sub + " <@user> <" + (sub == "setlevel" ? "level" : "xp") + ">`");
+                return;
+            }
+            if (args[2].empty() || args[2][0] == '-') {
+                bot.send_message(msg.channel_id, "" + bronx::emj_no + " Amount must be a non-negative number.");
+                return;
+            }
+            uint64_t val = 0;
+            try {
+                val = std::stoull(args[2]);
+            } catch (...) {
+                bot.send_message(msg.channel_id, "" + bronx::emj_no + " Invalid number `" + args[2] + "`.");
+                return;
+            }
+
+            helpers::resolve_user(bot, msg.server_id, args[1], [&bot, msg, sub, val](stoatpp::models::User target_user, stoatpp::models::Member, bool success) {
+                if (!success) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_no + " Could not resolve target user.");
+                    return;
+                }
+                uint64_t new_xp = 0;
+                uint32_t new_lvl = 1;
+
+                if (sub == "setlevel") {
+                    uint64_t clamped = std::max<uint64_t>(1, std::min<uint64_t>(1000, val));
+                    new_lvl = static_cast<uint32_t>(clamped);
+                    new_xp = Database::calculate_xp_for_level(new_lvl);
+                } else if (sub == "setxp") {
+                    new_xp = val;
+                    new_lvl = Database::calculate_level_from_xp(new_xp);
+                } else {
+                    auto cur_opt = g_db->get_user_xp(target_user.id, msg.server_id);
+                    uint64_t cur_xp = cur_opt ? cur_opt->total_xp : 0;
+                    if (sub == "addxp") {
+                        new_xp = cur_xp + val;
+                    } else { // removexp
+                        new_xp = (cur_xp > val) ? (cur_xp - val) : 0;
+                    }
+                    new_lvl = Database::calculate_level_from_xp(new_xp);
+                }
+
+                if (g_db->set_user_xp(target_user.id, msg.server_id, new_xp, new_lvl)) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Updated <@" + target_user.id + "> to **Level " + std::to_string(new_lvl) + "** (`" + std::to_string(new_xp) + "` XP).");
+                } else {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_no + " Failed to update user XP.");
+                }
+            });
+        }
+        else if (sub == "resetuser") {
+            if (args.size() < 2) {
+                bot.send_message(msg.channel_id, "usage: `" + pfx + "level resetuser <@user>`");
+                return;
+            }
+            helpers::resolve_user(bot, msg.server_id, args[1], [&bot, msg](stoatpp::models::User target_user, stoatpp::models::Member, bool success) {
+                if (!success) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_no + " Could not resolve target user.");
+                    return;
+                }
+                if (g_db->reset_user_guild_xp(target_user.id, msg.server_id)) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Reset XP progress for <@" + target_user.id + "> in this server.");
+                } else {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_no + " Failed to reset user XP.");
+                }
+            });
+        }
+        else if (sub == "blacklist" || sub == "ignore") {
+            std::string bsub = args.size() >= 2 ? to_lower(args[1]) : "list";
+            if (bsub == "list") {
+                auto entries = g_db->get_xp_blacklist(msg.server_id);
+                if (entries.empty()) {
+                    bot.send_message(msg.channel_id, "ℹ️ No channels, roles, or users are currently XP-blacklisted in this server.");
+                    return;
+                }
+                std::string ch_str, role_str, usr_str;
+                for (const auto& e : entries) {
+                    if (e.target_type == "channel") ch_str += "<#" + e.target_id + "> (`" + e.target_id + "`)\n";
+                    else if (e.target_type == "role") role_str += "<@&" + e.target_id + "> (`" + e.target_id + "`)\n";
+                    else if (e.target_type == "user") usr_str += "<@" + e.target_id + "> (`" + e.target_id + "`)\n";
+                }
+                std::string out = "🚫 **XP Blacklist / Ignore List (" + std::to_string(entries.size()) + ")**\n\n";
+                if (!ch_str.empty()) out += "**Channels:**\n" + ch_str + "\n";
+                if (!role_str.empty()) out += "**Roles:**\n" + role_str + "\n";
+                if (!usr_str.empty()) out += "**Users:**\n" + usr_str + "\n";
+                bot.send_message(msg.channel_id, out);
+                return;
+            }
+
+            if (bsub != "add" && bsub != "remove") {
+                bot.send_message(msg.channel_id, "usage: `" + pfx + "level blacklist <list|add|remove> [channel|role|user] [target]`");
+                return;
+            }
+            if (args.size() < 4) {
+                bot.send_message(msg.channel_id, "usage: `" + pfx + "level blacklist " + bsub + " <channel|role|user> <target>`");
+                return;
+            }
+
+            std::string ttype = to_lower(args[2]);
+            if (ttype == "ch") ttype = "channel";
+            if (ttype != "channel" && ttype != "role" && ttype != "user") {
+                bot.send_message(msg.channel_id, "" + bronx::emj_no + " Invalid target type `" + args[2] + "`. Choose `channel`, `role`, or `user`.");
+                return;
+            }
+
+            std::string raw_target;
+            for (size_t i = 3; i < args.size(); ++i) {
+                raw_target += args[i] + (i + 1 < args.size() ? " " : "");
+            }
+
+            std::string target_id;
+            if (ttype == "channel") {
+                target_id = helpers::clean_channel_id(raw_target);
+                if (target_id.empty()) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_no + " Invalid channel mention or ID.");
+                    return;
+                }
+            } else if (ttype == "role") {
+                std::string cr = clean_role_query(raw_target);
+                std::string lcr = to_lower(cr);
+                for (const auto& r : server_opt->roles) {
+                    if (r.id == cr || to_lower(r.name) == lcr) {
+                        target_id = r.id;
+                        break;
+                    }
+                }
+                if (target_id.empty() && cr.size() == 26) target_id = cr;
+                if (target_id.empty()) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_no + " Could not find role `" + raw_target + "` in this server.");
+                    return;
+                }
+            } else {
+                target_id = helpers::clean_user_id(raw_target);
+                if (target_id.empty()) {
+                    helpers::resolve_user(bot, msg.server_id, raw_target, [&bot, msg, bsub](stoatpp::models::User u, stoatpp::models::Member, bool ok) {
+                        if (!ok) {
+                            bot.send_message(msg.channel_id, "" + bronx::emj_no + " Could not resolve target user.");
+                            return;
+                        }
+                        if (bsub == "add") {
+                            Database::XPBlacklistEntry e{0, msg.server_id, "user", u.id, msg.author.id};
+                            if (g_db->add_xp_blacklist(e)) bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Added <@" + u.id + "> to XP blacklist.");
+                            else bot.send_message(msg.channel_id, "" + bronx::emj_no + " Failed to update XP blacklist.");
+                        } else {
+                            if (g_db->remove_xp_blacklist(msg.server_id, "user", u.id)) bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Removed <@" + u.id + "> from XP blacklist.");
+                            else bot.send_message(msg.channel_id, "" + bronx::emj_no + " Failed to remove from XP blacklist.");
+                        }
+                    });
+                    return;
+                }
+            }
+
+            std::string disp = (ttype == "channel") ? "<#" + target_id + ">" : ((ttype == "role") ? "<@&" + target_id + ">" : "<@" + target_id + ">");
+            if (bsub == "add") {
+                Database::XPBlacklistEntry e{0, msg.server_id, ttype, target_id, msg.author.id};
+                if (g_db->add_xp_blacklist(e)) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Added " + disp + " (" + ttype + ") to the XP blacklist.");
+                } else {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_no + " Failed to add to XP blacklist.");
+                }
+            } else {
+                if (g_db->remove_xp_blacklist(msg.server_id, ttype, target_id)) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Removed " + disp + " (" + ttype + ") from the XP blacklist.");
+                } else {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_no + " Failed to remove from XP blacklist.");
                 }
             }
         } else {

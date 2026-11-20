@@ -1836,4 +1836,9 @@ bool Database::is_opted_out(const std::string &user_id, int flag) {
   return get_user_optout(user_id).has(flag);
 }
 
+bool Database::reload_roles(const std::string &server_id) {
+  // Roles are queried fresh from DB, nothing cached in-memory that needs invalidation
+  return true;
+}
+
 } // namespace bronx

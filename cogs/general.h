@@ -715,6 +715,249 @@ public:
            bot.send_message(msg.channel_id, payload);
          },
          "General"});
+
+    // --- .say [channel] <message> ---
+    bot.register_command(
+        {"say",
+         {"echo", "speak"},
+         "send a message as the bot into this or a specified channel.",
+         "[channel] <message>",
+         {"[channel]", "<message>"},
+         [](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+            const std::vector<std::string> &args) {
+           if (args.empty()) {
+             bot.send_message(msg.channel_id, "usage: `.say [#channel] <message>`");
+             return;
+           }
+
+           std::string target_channel = msg.channel_id;
+           size_t start_idx = 0;
+
+           std::string cleaned_ch = helpers::clean_channel_id(args[0]);
+           if (!cleaned_ch.empty() && cleaned_ch.size() == 26) {
+             target_channel = cleaned_ch;
+             start_idx = 1;
+           }
+
+           if (start_idx >= args.size()) {
+             bot.send_message(msg.channel_id, "" + bronx::emj_warning + " please provide a message to say.");
+             return;
+           }
+
+           std::string to_say;
+           for (size_t i = start_idx; i < args.size(); ++i) {
+             to_say += args[i] + (i + 1 < args.size() ? " " : "");
+           }
+
+           bot.rest().delete_message(msg.channel_id, msg.id);
+           bot.send_message(target_channel, to_say);
+         },
+         "General",
+         stoatpp::permissions::ManageMessages});
+
+    // --- .embed [channel] <json|text> ---
+    bot.register_command(
+        {"embed",
+         {"sayembed"},
+         "send a custom rich embed into this or a specified channel.",
+         "[channel] <json | title: ... desc: ... col: ...>",
+         {"[channel]", "<content>"},
+         [](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+            const std::vector<std::string> &args) {
+           if (args.empty()) {
+             bot.send_message(msg.channel_id,
+                 "usage: `.embed [#channel] <json_or_text>`\n"
+                 "Examples:\n"
+                 "• `.embed {\"title\":\"Announcement\",\"description\":\"Maintenance at 8PM\",\"colour\":\"#5865F2\"}`\n"
+                 "• `.embed title: Welcome desc: Please read the rules col: #ED4245`");
+             return;
+           }
+
+           std::string target_channel = msg.channel_id;
+           size_t start_idx = 0;
+
+           std::string cleaned_ch = helpers::clean_channel_id(args[0]);
+           if (!cleaned_ch.empty() && cleaned_ch.size() == 26) {
+             target_channel = cleaned_ch;
+             start_idx = 1;
+           }
+
+           if (start_idx >= args.size()) {
+             bot.send_message(msg.channel_id, "" + bronx::emj_warning + " please provide embed content.");
+             return;
+           }
+
+           std::string raw_input;
+           for (size_t i = start_idx; i < args.size(); ++i) {
+             raw_input += args[i] + (i + 1 < args.size() ? " " : "");
+           }
+
+           stoatpp::models::MessagePayload payload;
+           stoatpp::models::Embed embed;
+
+           bool parsed_json = false;
+           if (!raw_input.empty() && raw_input.front() == '{' && raw_input.back() == '}') {
+             try {
+               nlohmann::json j = nlohmann::json::parse(raw_input);
+               if (j.contains("title") && j["title"].is_string()) embed.set_title(j["title"].get<std::string>());
+               if (j.contains("description") && j["description"].is_string()) embed.set_description(j["description"].get<std::string>());
+               if (j.contains("colour") && j["colour"].is_string()) embed.set_colour(j["colour"].get<std::string>());
+               else if (j.contains("color") && j["color"].is_string()) embed.set_colour(j["color"].get<std::string>());
+               if (j.contains("url") && j["url"].is_string()) embed.set_url(j["url"].get<std::string>());
+               if (j.contains("icon_url") && j["icon_url"].is_string()) embed.set_icon_url(j["icon_url"].get<std::string>());
+               if (j.contains("media") && j["media"].is_string()) embed.set_image(j["media"].get<std::string>());
+               else if (j.contains("image") && j["image"].is_string()) embed.set_image(j["image"].get<std::string>());
+               if (j.contains("content") && j["content"].is_string()) payload.content = j["content"].get<std::string>();
+               parsed_json = true;
+             } catch (...) {
+               parsed_json = false;
+             }
+           }
+
+           if (!parsed_json) {
+             std::string title, desc, colour = "#5865F2";
+             std::string current_key = "desc";
+             std::string current_val;
+
+             auto flush_key = [&](const std::string& key, const std::string& val) {
+               std::string trimmed = val;
+               size_t first = trimmed.find_first_not_of(" \t");
+               if (first != std::string::npos) trimmed = trimmed.substr(first);
+               size_t last = trimmed.find_last_not_of(" \t");
+               if (last != std::string::npos) trimmed = trimmed.substr(0, last + 1);
+
+               if (key == "title") title = trimmed;
+               else if (key == "desc" || key == "description") desc = trimmed;
+               else if (key == "col" || key == "color" || key == "colour") colour = trimmed;
+             };
+
+             for (size_t i = start_idx; i < args.size(); ++i) {
+               const auto& a = args[i];
+               if (a == "title:" || a == "title") {
+                 flush_key(current_key, current_val);
+                 current_key = "title";
+                 current_val = "";
+               } else if (a == "desc:" || a == "description:" || a == "description") {
+                 flush_key(current_key, current_val);
+                 current_key = "desc";
+                 current_val = "";
+               } else if (a == "col:" || a == "color:" || a == "colour:") {
+                 flush_key(current_key, current_val);
+                 current_key = "col";
+                 current_val = "";
+               } else {
+                 current_val += (current_val.empty() ? "" : " ") + a;
+               }
+             }
+             flush_key(current_key, current_val);
+
+             if (desc.empty() && !title.empty()) {
+               desc = title;
+               title.clear();
+             }
+
+             if (!title.empty()) embed.set_title(title);
+             if (!desc.empty()) embed.set_description(desc);
+             embed.set_colour(colour);
+           }
+
+           bot.rest().delete_message(msg.channel_id, msg.id);
+
+           payload.add_embed(embed);
+           bot.send_message(target_channel, payload);
+         },
+         "General",
+         stoatpp::permissions::ManageMessages});
+
+    // --- .quote <message_id> [#channel] ---
+    bot.register_command(
+        {"quote",
+         {"q"},
+         "quote a message by its ID or direct link.",
+         "<message_id> [channel]",
+         {"<message_id>", "[channel]"},
+         [](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+            const std::vector<std::string> &args) {
+           if (args.empty()) {
+             bot.send_message(msg.channel_id, "usage: `.quote <message_id> [#channel]`");
+             return;
+           }
+
+           std::string target_msg_id = args[0];
+           std::string target_channel = msg.channel_id;
+
+           if (args.size() > 1) {
+             std::string ch = helpers::clean_channel_id(args[1]);
+             if (!ch.empty() && ch.size() == 26) {
+               target_channel = ch;
+             }
+           } else if (target_msg_id.find("/channel/") != std::string::npos) {
+             auto pos = target_msg_id.find("/channel/");
+             std::string rest = target_msg_id.substr(pos + 9);
+             auto slash_pos = rest.find('/');
+             if (slash_pos != std::string::npos) {
+               target_channel = rest.substr(0, slash_pos);
+               target_msg_id = rest.substr(slash_pos + 1);
+               auto q_pos = target_msg_id.find('?');
+               if (q_pos != std::string::npos) target_msg_id = target_msg_id.substr(0, q_pos);
+             }
+           }
+
+           std::thread([&bot, msg, target_channel, target_msg_id]() {
+             auto res = bot.rest().get_message(target_channel, target_msg_id);
+             if (!res.success()) {
+               bot.send_message(msg.channel_id, "" + bronx::emj_warning + " could not find message `" + target_msg_id + "` in <#" + target_channel + ">.");
+               return;
+             }
+
+             std::string content = res.body.value("content", "");
+             std::string author_id = res.body.value("author", "");
+             std::string author_name = author_id;
+             std::string author_avatar = "";
+
+             auto cached_user = bot.get_user(author_id);
+             if (cached_user) {
+               author_name = cached_user->username;
+               author_avatar = cached_user->avatar_url(bot.config().cdn_url);
+             } else {
+               auto ures = bot.rest().get_user(author_id);
+               if (ures.success()) {
+                 author_name = ures.body.value("username", author_id);
+                 if (ures.body.contains("avatar") && ures.body["avatar"].is_object() && ures.body["avatar"].contains("_id")) {
+                   author_avatar = bot.config().cdn_url + "/avatars/" + ures.body["avatar"]["_id"].get<std::string>();
+                 }
+               }
+             }
+
+             uint64_t msg_ts = stoatpp::utils::decode_ulid_timestamp(target_msg_id);
+             std::string ts_str = helpers::format_epoch_ms(msg_ts);
+
+             stoatpp::models::Embed embed;
+             embed.title = "Quote from @" + author_name;
+             if (!author_avatar.empty()) {
+               embed.icon_url = author_avatar;
+             }
+             embed.colour = "#5865F2";
+
+             std::string desc = content.empty() ? "*(no text content)*" : content;
+             desc += "\n\n— [Jump to Message](https://app.stoat.chat/channel/" + target_channel + "/" + target_msg_id + ") in <#" + target_channel + ">";
+             embed.description = desc;
+
+             // Check attachments
+             if (res.body.contains("attachments") && res.body["attachments"].is_array() && !res.body["attachments"].empty()) {
+               auto first_att = res.body["attachments"][0];
+               std::string att_id = first_att.value("_id", first_att.value("id", ""));
+               if (!att_id.empty()) {
+                 embed.set_image(att_id);
+               }
+             }
+
+             stoatpp::models::MessagePayload payload;
+             payload.add_embed(embed);
+             bot.send_message(msg.channel_id, payload);
+           }).detach();
+         },
+         "General"});
   }
 
 private:

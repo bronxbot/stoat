@@ -347,6 +347,71 @@ bool Database::init_tables() {
       mysql_query(mysql_, "ALTER TABLE moderation_logs ADD COLUMN channel_id VARCHAR(30) DEFAULT NULL");
     }
 
+    // Create Table moderation_notes
+    std::string create_modnotes =
+        "CREATE TABLE IF NOT EXISTS moderation_notes ("
+        "  id INT AUTO_INCREMENT PRIMARY KEY,"
+        "  server_id VARCHAR(30) NOT NULL,"
+        "  target_id VARCHAR(30) NOT NULL,"
+        "  moderator_id VARCHAR(30) NOT NULL,"
+        "  note TEXT NOT NULL,"
+        "  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "  INDEX idx_target (server_id, target_id)"
+        ")";
+    if (mysql_query(mysql_, create_modnotes.c_str())) {
+      std::cerr << "[bronx db] failed to create table 'moderation_notes': "
+                << mysql_error(mysql_) << "\n";
+    }
+
+    // Create Table temp_roles
+    std::string create_temproles =
+        "CREATE TABLE IF NOT EXISTS temp_roles ("
+        "  id INT AUTO_INCREMENT PRIMARY KEY,"
+        "  server_id VARCHAR(30) NOT NULL,"
+        "  user_id VARCHAR(30) NOT NULL,"
+        "  role_id VARCHAR(30) NOT NULL,"
+        "  assigned_by VARCHAR(30) NOT NULL,"
+        "  expires_at BIGINT UNSIGNED NOT NULL,"
+        "  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "  INDEX idx_expires (expires_at),"
+        "  INDEX idx_user_server (server_id, user_id)"
+        ")";
+    if (mysql_query(mysql_, create_temproles.c_str())) {
+      std::cerr << "[bronx db] failed to create table 'temp_roles': "
+                << mysql_error(mysql_) << "\n";
+    }
+
+    // Create Table giveaways
+    std::string create_giveaways =
+        "CREATE TABLE IF NOT EXISTS giveaways ("
+        "  id INT AUTO_INCREMENT PRIMARY KEY,"
+        "  message_id VARCHAR(30) NOT NULL UNIQUE,"
+        "  channel_id VARCHAR(30) NOT NULL,"
+        "  server_id VARCHAR(30) NOT NULL,"
+        "  host_id VARCHAR(30) NOT NULL,"
+        "  prize VARCHAR(255) NOT NULL,"
+        "  winners_count INT NOT NULL DEFAULT 1,"
+        "  end_time BIGINT UNSIGNED NOT NULL,"
+        "  ended BOOLEAN NOT NULL DEFAULT FALSE,"
+        "  required_role_id VARCHAR(255) NOT NULL DEFAULT '',"
+        "  min_level INT NOT NULL DEFAULT 0,"
+        "  min_messages INT NOT NULL DEFAULT 0,"
+        "  messages_days INT NOT NULL DEFAULT 7,"
+        "  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "  INDEX idx_ended_time (ended, end_time)"
+        ")";
+    if (mysql_query(mysql_, create_giveaways.c_str())) {
+      std::cerr << "[bronx db] failed to create table 'giveaways': "
+                << mysql_error(mysql_) << "\n";
+    }
+
+    // Migrations for existing giveaways table
+    mysql_query(mysql_, "ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS required_role_id VARCHAR(255) NOT NULL DEFAULT ''");
+    mysql_query(mysql_, "ALTER TABLE giveaways MODIFY COLUMN required_role_id VARCHAR(255) NOT NULL DEFAULT ''");
+    mysql_query(mysql_, "ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS min_level INT NOT NULL DEFAULT 0");
+    mysql_query(mysql_, "ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS min_messages INT NOT NULL DEFAULT 0");
+    mysql_query(mysql_, "ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS messages_days INT NOT NULL DEFAULT 7");
+
     // Create Table command_usage_history
     std::string create_cmd_history =
         "CREATE TABLE IF NOT EXISTS command_usage_history ("
@@ -584,6 +649,38 @@ bool Database::init_tables() {
         ")";
     if (mysql_query(mysql_, create_server_members.c_str())) {
       std::cerr << "[bronx db] failed to create table 'server_members': "
+                << mysql_error(mysql_) << "\n";
+      return false;
+    }
+
+    // Create Table guild_roles (Dashboard multi-level role hierarchy)
+    std::string create_guild_roles =
+        "CREATE TABLE IF NOT EXISTS guild_roles ("
+        "  server_id VARCHAR(30) NOT NULL,"
+        "  role_id VARCHAR(30) NOT NULL,"
+        "  name VARCHAR(100) NOT NULL,"
+        "  position INT NOT NULL,"
+        "  permissions JSON DEFAULT NULL,"
+        "  PRIMARY KEY (server_id, role_id),"
+        "  INDEX idx_guild_roles_pos (server_id, position)"
+        ")";
+    if (mysql_query(mysql_, create_guild_roles.c_str())) {
+      std::cerr << "[bronx db] failed to create table 'guild_roles': "
+                << mysql_error(mysql_) << "\n";
+      return false;
+    }
+
+    // Create Table user_roles (User role assignments)
+    std::string create_user_roles =
+        "CREATE TABLE IF NOT EXISTS user_roles ("
+        "  server_id VARCHAR(30) NOT NULL,"
+        "  user_id VARCHAR(30) NOT NULL,"
+        "  role_id VARCHAR(30) NOT NULL,"
+        "  PRIMARY KEY (server_id, user_id, role_id),"
+        "  INDEX idx_user_roles (server_id, user_id)"
+        ")";
+    if (mysql_query(mysql_, create_user_roles.c_str())) {
+      std::cerr << "[bronx db] failed to create table 'user_roles': "
                 << mysql_error(mysql_) << "\n";
       return false;
     }
@@ -907,6 +1004,24 @@ bool Database::init_tables() {
         ")";
     if (mysql_query(mysql_, create_tickets.c_str())) {
       std::cerr << "[bronx db] failed to create table 'tickets': "
+                << mysql_error(mysql_) << "\n";
+      return false;
+    }
+    mysql_query(mysql_, "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS assigned_to VARCHAR(30) DEFAULT NULL");
+    mysql_query(mysql_, "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT NULL");
+
+    // Create Table ticket_notes (Threaded ticket review notes)
+    std::string create_ticket_notes =
+        "CREATE TABLE IF NOT EXISTS ticket_notes ("
+        "  id INT AUTO_INCREMENT PRIMARY KEY,"
+        "  ticket_id VARCHAR(30) NOT NULL,"
+        "  user_id VARCHAR(30) NOT NULL,"
+        "  note TEXT NOT NULL,"
+        "  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "  INDEX idx_ticket_notes (ticket_id)"
+        ")";
+    if (mysql_query(mysql_, create_ticket_notes.c_str())) {
+      std::cerr << "[bronx db] failed to create table 'ticket_notes': "
                 << mysql_error(mysql_) << "\n";
       return false;
     }

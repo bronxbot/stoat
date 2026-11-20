@@ -389,6 +389,40 @@ struct ModHistoryEntry {
     uint64_t created_at; // unix timestamp
 };
 
+struct ModNoteEntry {
+    int id = 0;
+    std::string server_id;
+    std::string target_id;
+    std::string moderator_id;
+    std::string note;
+    uint64_t created_at = 0; // unix timestamp
+};
+
+struct TempRoleEntry {
+    int id = 0;
+    std::string server_id;
+    std::string user_id;
+    std::string role_id;
+    std::string assigned_by;
+    uint64_t expires_at = 0; // unix timestamp
+};
+
+struct GiveawayEntry {
+    int id = 0;
+    std::string message_id;
+    std::string channel_id;
+    std::string server_id;
+    std::string host_id;
+    std::string prize;
+    int winners_count = 1;
+    uint64_t end_time = 0; // unix timestamp
+    bool ended = false;
+    std::string required_role_id = "";
+    int min_level = 0;
+    int min_messages = 0;
+    int messages_days = 7;
+};
+
 struct ModLogEntry {
     int id;
     std::string action;
@@ -547,6 +581,24 @@ struct Ticket {
     std::string welcome_message_id;
     std::string status = "open"; // "open" or "closed"
     std::string panel_name = "default";
+    std::string assigned_to;
+    std::string notes;
+};
+
+struct TicketNote {
+    int id = 0;
+    std::string ticket_id;
+    std::string user_id;
+    std::string note;
+    std::string created_at;
+};
+
+struct GuildRole {
+    std::string server_id;
+    std::string role_id;
+    std::string name;
+    int position = 100;
+    std::string permissions_json;
 };
 
 struct TicketConfig {

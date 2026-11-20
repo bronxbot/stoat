@@ -9,43 +9,149 @@
 namespace bronx::cogs {
 
 class RemindersModule : public stoatpp::bot_module {
+private:
+    static void send_reminder_list(stoatpp::cluster& bot,
+                                   const stoatpp::events::Message& msg) {
+        if (!g_db) {
+            bot.send_message(msg.channel_id,
+                             "Reminder storage is currently unavailable.");
+            return;
+        }
+
+        auto rems = g_db->get_user_reminders(msg.author.id);
+        if (rems.empty()) {
+            bot.send_message(msg.channel_id,
+                             "You don't have any active reminders. Set one with `" +
+                             (msg.prefix.empty() ? bot.config().command_prefix : msg.prefix) +
+                             "remind <time> <message>`.");
+            return;
+        }
+
+        stoatpp::models::MessagePayload payload;
+        stoatpp::models::Embed embed;
+        embed.set_colour(0x5865F2);
+        embed.set_title("Your reminders");
+
+        std::string desc;
+        for (size_t i = 0; i < rems.size(); ++i) {
+            desc += "**" + std::to_string(i + 1) + ".** (`#" + std::to_string(rems[i].id) + "`) <t:" +
+                    std::to_string(rems[i].timestamp_due) + ":R> — " +
+                    rems[i].message + "\n";
+            if (desc.size() > 3000) {
+                desc += "... and more";
+                break;
+            }
+        }
+        embed.set_description(desc);
+        payload.add_embed(embed);
+        bot.send_message(msg.channel_id, payload);
+    }
+
+    static void handle_reminder_delete(stoatpp::cluster& bot,
+                                       const stoatpp::events::Message& msg,
+                                       const std::string& spec) {
+        if (!g_db) {
+            bot.send_message(msg.channel_id, "Reminder storage is currently unavailable.");
+            return;
+        }
+        auto rems = g_db->get_user_reminders(msg.author.id);
+        if (rems.empty()) {
+            bot.send_message(msg.channel_id, "You don't have any active reminders to delete.");
+            return;
+        }
+
+        bool explicit_id = (!spec.empty() && spec[0] == '#');
+        std::string num_str = explicit_id ? spec.substr(1) : spec;
+        int val = 0;
+        try {
+            val = std::stoi(num_str);
+        } catch (...) {
+            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid reminder number or `#id`.");
+            return;
+        }
+
+        int matched_idx = -1;
+        if (explicit_id) {
+            for (size_t i = 0; i < rems.size(); ++i) {
+                if (rems[i].id == val) { matched_idx = static_cast<int>(i); break; }
+            }
+        } else if (val >= 1 && static_cast<size_t>(val) <= rems.size()) {
+            matched_idx = val - 1;
+        } else {
+            for (size_t i = 0; i < rems.size(); ++i) {
+                if (rems[i].id == val) { matched_idx = static_cast<int>(i); break; }
+            }
+        }
+
+        if (matched_idx < 0) {
+            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " could not find reminder `" + spec + "` among your active reminders.");
+            return;
+        }
+
+        const auto& target = rems[matched_idx];
+        if (g_db->delete_reminder(target.id)) {
+            bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Deleted reminder (`#" + std::to_string(target.id) + "`): *" + target.message + "*");
+        } else {
+            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to delete reminder.");
+        }
+    }
+
+    static void handle_reminder_clear(stoatpp::cluster& bot,
+                                      const stoatpp::events::Message& msg) {
+        if (!g_db) {
+            bot.send_message(msg.channel_id, "Reminder storage is currently unavailable.");
+            return;
+        }
+        auto rems = g_db->get_user_reminders(msg.author.id);
+        if (rems.empty()) {
+            bot.send_message(msg.channel_id, "You don't have any active reminders to clear.");
+            return;
+        }
+        int cleared = 0;
+        for (const auto& r : rems) {
+            if (g_db->delete_reminder(r.id)) cleared++;
+        }
+        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Cleared **" + std::to_string(cleared) + "** active reminder(s).");
+    }
+
 public:
     void register_handlers(stoatpp::cluster& bot) override {
         bot.register_command({
             "remind",
             {"remindme", "reminder"},
-            "set a reminder up to 2 years in the future.",
-            "",
-            {"<time>", "<message>"},
+            "set, list, delete, or clear reminders.",
+            "remind <time> <message> | remind list | remind delete <number|#id> | remind clear",
+            {},
             [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
-                if (args.size() > 0 && args[0] == "list") {
-                    auto rems = g_db->get_user_reminders(msg.author.id);
-                    if (rems.empty()) {
-                        bot.send_message(msg.channel_id, "you don't have any active reminders.");
+                const std::string prefix =
+                    msg.prefix.empty() ? bot.config().command_prefix : msg.prefix;
+
+                if (!args.empty()) {
+                    std::string sub = args[0];
+                    std::transform(sub.begin(), sub.end(), sub.begin(), ::tolower);
+                    if (sub == "list") {
+                        send_reminder_list(bot, msg);
                         return;
                     }
-
-                    stoatpp::models::MessagePayload payload;
-                    stoatpp::models::Embed embed;
-                    embed.set_colour(0x5865F2);
-                    embed.set_title("your reminders");
-                    
-                    std::string desc = "";
-                    for (size_t i = 0; i < rems.size(); ++i) {
-                        desc += "**" + std::to_string(i + 1) + ".** <t:" + std::to_string(rems[i].timestamp_due) + ":R> — " + rems[i].message + "\n";
-                        if (desc.size() > 3000) {
-                            desc += "... and more";
-                            break;
-                        }
+                    if (sub == "clear") {
+                        handle_reminder_clear(bot, msg);
+                        return;
                     }
-                    embed.set_description(desc);
-                    payload.add_embed(embed);
-                    bot.send_message(msg.channel_id, payload);
-                    return;
+                    if (sub == "delete" || sub == "remove" || sub == "cancel" || sub == "del") {
+                        if (args.size() < 2) {
+                            bot.send_message(msg.channel_id, "Usage: `" + prefix + "remind " + sub + " <number|#id>` (use `" + prefix + "remind list` to see numbers/IDs).");
+                            return;
+                        }
+                        handle_reminder_delete(bot, msg, args[1]);
+                        return;
+                    }
                 }
 
                 if (args.size() < 2) {
-                    bot.send_message(msg.channel_id, "usage: `!remind <time> <message>` (e.g. `!remind 2h check oven`)\nor `!remind list` to view active reminders.");
+                    bot.send_message(msg.channel_id, "Usage: `" + prefix +
+                        "remind <time> <message>` (for example, `" + prefix +
+                        "remind 2h check oven`), `" + prefix +
+                        "remind list`, `" + prefix + "remind delete <number|#id>`, or `" + prefix + "remind clear`.");
                     return;
                 }
 
@@ -80,35 +186,33 @@ public:
             "Utility"
         });
 
+        // Compatibility shortcut; the canonical route is `.remind list`.
         bot.register_command({
             "reminders",
             {"remindlist", "reminderlist"},
-            "list all your currently active reminders.",
+            "shortcut for `remind list`.",
             "",
             {},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>&) {
+                send_reminder_list(bot, msg);
+            },
+            "Utility"
+        });
+
+        bot.register_command({
+            "delremind",
+            {"rmremind", "unremind"},
+            "delete one of your active reminders by list number or #id.",
+            "<number|#id>",
+            {"<number|#id>"},
             [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
-                auto rems = g_db->get_user_reminders(msg.author.id);
-                if (rems.empty()) {
-                    bot.send_message(msg.channel_id, "you don't have any active reminders.");
+                const std::string prefix =
+                    msg.prefix.empty() ? bot.config().command_prefix : msg.prefix;
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "Usage: `" + prefix + "delremind <number|#id>` (use `" + prefix + "remind list` to view active reminders).");
                     return;
                 }
-
-                stoatpp::models::MessagePayload payload;
-                stoatpp::models::Embed embed;
-                embed.set_colour(0x5865F2);
-                embed.set_title("your reminders");
-                
-                std::string desc = "";
-                for (size_t i = 0; i < rems.size(); ++i) {
-                    desc += "**" + std::to_string(i + 1) + ".** <t:" + std::to_string(rems[i].timestamp_due) + ":R> — " + rems[i].message + "\n";
-                    if (desc.size() > 3000) {
-                        desc += "... and more";
-                        break;
-                    }
-                }
-                embed.set_description(desc);
-                payload.add_embed(embed);
-                bot.send_message(msg.channel_id, payload);
+                handle_reminder_delete(bot, msg, args[0]);
             },
             "Utility"
         });

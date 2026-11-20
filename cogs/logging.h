@@ -319,21 +319,15 @@ dispatch_log(stoatpp::cluster &bot, const std::string &server_id,
             }
           }
         }
-      } else if (get_res.status_code == 404) {
-        // Channel does not exist! Evict configuration from DB
-        std::cout << "[bronx logging] Evicting deleted log channel " << log_chan
-                  << " for event " << event_type_copy << "\n";
-        g_db->remove_logging_channel(server_id_copy, event_type_copy);
-        return;
-      } else if (get_res.status_code == 403) {
-        // Missing ManageWebhooks permission — cache this so we don't spam 403
-        // errors
+      } else if (get_res.status_code == 403 || get_res.status_code == 404) {
+        // Missing ManageWebhooks permission or webhooks not supported on channel.
+        // Cache to avoid hammering endpoint, but do NOT delete channel from DB.
         std::lock_guard<std::mutex> lock(g_no_webhook_mutex);
         g_no_webhook_channels.insert(log_chan);
       }
 
       if (wh_id.empty() && get_res.status_code != 403) {
-        // No existing webhook found, create a new one
+        // No existing webhook found, attempt to create a new one
         auto create_res = bot.rest().create_webhook(log_chan, "Bronx Logger");
         if (create_res.success()) {
           auto wh = stoatpp::models::Webhook::from_json(create_res.body);
@@ -342,15 +336,8 @@ dispatch_log(stoatpp::cluster &bot, const std::string &server_id,
             wh_token = *wh.token;
             g_db->save_logging_webhook(log_chan, wh_id, wh_token);
           }
-        } else if (create_res.status_code == 404) {
-          // Channel does not exist! Evict configuration from DB
-          std::cout << "[bronx logging] Evicting deleted log channel "
-                    << log_chan << " for event " << event_type_copy << "\n";
-          g_db->remove_logging_channel(server_id_copy, event_type_copy);
-          return;
-        } else if (create_res.status_code == 403) {
-          // Missing ManageWebhooks permission — cache this so we don't spam 403
-          // errors
+        } else {
+          // If webhook creation fails for any reason (403, 404, etc.), mark channel to skip webhooks
           std::lock_guard<std::mutex> lock(g_no_webhook_mutex);
           g_no_webhook_channels.insert(log_chan);
         }
@@ -367,18 +354,12 @@ dispatch_log(stoatpp::cluster &bot, const std::string &server_id,
       auto exec_res = bot.rest().execute_webhook(wh_id, wh_token, wh_payload);
       if (exec_res.success()) {
         sent_via_webhook = true;
-      } else if (exec_res.status_code == 404) {
-        // Check if the channel is deleted or just the webhook
-        auto ch_res = bot.rest().get_channel(log_chan);
-        if (!ch_res.success() && ch_res.status_code == 404) {
-          std::cout << "[bronx logging] Evicting deleted log channel "
-                    << log_chan << " for event " << event_type_copy << "\n";
-          g_db->remove_logging_channel(server_id_copy, event_type_copy);
-          return;
-        } else {
-          // Webhook was deleted on the server, evict from DB cache
-          g_db->remove_logging_webhook(log_chan);
-        }
+      } else {
+        // Webhook execution failed (token invalidated, webhook deleted, or 404).
+        // Evict cached webhook from DB and fall back to standard bot message.
+        g_db->remove_logging_webhook(log_chan);
+        std::lock_guard<std::mutex> lock(g_no_webhook_mutex);
+        g_no_webhook_channels.insert(log_chan);
       }
     }
 
@@ -389,13 +370,15 @@ dispatch_log(stoatpp::cluster &bot, const std::string &server_id,
           [&bot, server_id_copy, event_type_copy,
            log_chan](stoatpp::models::Message, bool success) {
             if (!success) {
-              // Check if channel is deleted
-              auto ch_res = bot.rest().get_channel(log_chan);
-              if (!ch_res.success() && ch_res.status_code == 404) {
-                std::cout << "[bronx logging] Evicting deleted log channel "
-                          << log_chan << " for event " << event_type_copy
-                          << "\n";
-                g_db->remove_logging_channel(server_id_copy, event_type_copy);
+              // Only evict from DB if the channel itself is definitively confirmed deleted
+              if (!bot.get_channel(log_chan)) {
+                auto ch_res = bot.rest().get_channel(log_chan);
+                if (!ch_res.success() && ch_res.status_code == 404) {
+                  std::cout << "[bronx logging] Evicting definitively deleted log channel "
+                            << log_chan << " for event " << event_type_copy
+                            << "\n";
+                  g_db->remove_logging_channel(server_id_copy, event_type_copy);
+                }
               }
             }
           });

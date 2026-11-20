@@ -159,6 +159,79 @@ public:
         });
 
         bot.register_command({
+            "softban",
+            {},
+            "kick a member and purge their recent messages (ban + instant unban).",
+            "",
+            {"<@user|id>", "[reason]"},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                std::cout << "[bronx command] handling softban...\n";
+
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, stoatpp::permissions::BanMembers)) {
+                        bot.send_message(msg.channel_id, "permission error: you do not have permission to ban/softban members.");
+                        return;
+                    }
+                }
+
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "usage: `" + msg.prefix + "softban <@user|id> [reason]`");
+                    return;
+                }
+
+                std::string query = args[0];
+                std::string reason = "no reason provided";
+                if (args.size() > 1) {
+                    reason = "";
+                    for (size_t i = 1; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
+
+                helpers::resolve_user(bot, msg.server_id, query, [&bot, msg, reason](stoatpp::models::User target_user, stoatpp::models::Member target_member, bool success) {
+                    if (!success) {
+                        bot.send_message(msg.channel_id, "could not resolve target user for softban.");
+                        return;
+                    }
+
+                    bot.fetch_member(msg.server_id, msg.author.id, [&bot, msg, target_member, reason, target_user](stoatpp::models::Member exec_member, bool exec_ok) {
+                        if (!exec_ok) {
+                            bot.send_message(msg.channel_id, "failed to verify executor member settings.");
+                            return;
+                        }
+
+                        if (!target_member.id.empty() && !helpers::check_hierarchy(bot, msg.server_id, exec_member, target_member)) {
+                            bot.send_message(msg.channel_id, "hierarchy error: you cannot moderate this user.");
+                            return;
+                        }
+
+                        bot.ban_user(msg.server_id, target_user.id, "[Softban] " + reason, [&bot, msg, target_user, reason](bool ban_ok) {
+                            if (ban_ok) {
+                                bot.unban_user(msg.server_id, target_user.id, [&bot, msg, target_user, reason](bool) {
+                                    std::unordered_map<std::string, std::string> tokens = {
+                                        {"{user}", "<@" + target_user.id + ">"},
+                                        {"{username}", target_user.username},
+                                        {"{reason}", reason},
+                                        {"{moderator}", "<@" + msg.author.id + ">"},
+                                        {"{modname}", msg.author.username}
+                                    };
+                                    send_action_response(bot, msg.server_id, msg.channel_id, "softban", tokens, "successfully softbanned **" + target_user.username + "** (messages purged).");
+                                    log_moderation_action(bot, msg.server_id, "Softban", msg.author.id, target_user.id, reason, "", msg.channel_id);
+                                });
+                            } else {
+                                bot.send_message(msg.channel_id, "failed to softban user. do i have target permissions?");
+                            }
+                        });
+                    });
+                });
+            },
+            "Moderation",
+            stoatpp::permissions::BanMembers
+        });
+
+        bot.register_command({
             "unban",
             {},
             "unban a user from the server.",
@@ -567,9 +640,9 @@ public:
 
         bot.register_command({
             "timeout",
-            {},
+            {"mute", "tempmute"},
             "timeout a member (mute/restrict).",
-            "",
+            "timeout <@user|id> <duration> [reason]",
             {"<@user|id>", "<duration>", "[reason]"},
             [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
                 std::cout << "[bronx command] handling timeout...\n";
@@ -679,6 +752,81 @@ public:
         });
 
         bot.register_command({
+            "untimeout",
+            {"unmute"},
+            "removes timeout/mute from a member.",
+            "unmute <@user|id> [reason]",
+            {"<@user|id>", "[reason]"},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "Usage: `" + (msg.prefix.empty() ? "." : msg.prefix) + "unmute <@user|id> [reason]`");
+                    return;
+                }
+
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, stoatpp::permissions::TimeoutMembers)) {
+                        bot.send_message(msg.channel_id, "permission error: you do not have permission to unmute members.");
+                        return;
+                    }
+                }
+
+                std::string query = args[0];
+                std::string reason = "no reason provided";
+                if (args.size() > 1) {
+                    reason = "";
+                    for (size_t i = 1; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
+
+                helpers::resolve_user(bot, msg.server_id, query, [&bot, msg, reason](stoatpp::models::User target_user, stoatpp::models::Member target_member, bool success) {
+                    if (!success) {
+                        bot.send_message(msg.channel_id, "could not resolve target user.");
+                        return;
+                    }
+
+                    bot.fetch_member(msg.server_id, msg.author.id, [&bot, msg, target_member, target_user, reason](stoatpp::models::Member exec_member, bool exec_ok) {
+                        if (!exec_ok) {
+                            bot.send_message(msg.channel_id, "failed to verify executor member settings.");
+                            return;
+                        }
+
+                        bot.fetch_member(msg.server_id, bot.current_user().id, [&bot, msg, target_member, target_user, exec_member, reason](stoatpp::models::Member bot_member, bool bot_ok) {
+                            if (!bot_ok) {
+                                bot.send_message(msg.channel_id, "failed to verify bot member settings.");
+                                return;
+                            }
+
+                            if (!helpers::check_hierarchy(bot, msg.server_id, exec_member, target_member)) {
+                                bot.send_message(msg.channel_id, "hierarchy error: you cannot moderate this user.");
+                                return;
+                            }
+
+                            if (!helpers::check_hierarchy(bot, msg.server_id, bot_member, target_member)) {
+                                bot.send_message(msg.channel_id, "hierarchy error: i do not have high enough position to moderate this user.");
+                                return;
+                            }
+
+                            bot.remove_timeout(msg.server_id, target_user.id, [&bot, msg, target_user, reason](bool action_success) {
+                                if (action_success) {
+                                    log_moderation_action(bot, msg.server_id, "Untimeout", msg.author.id, target_user.id, reason, "Removed timeout", msg.channel_id);
+                                    bot.send_message(msg.channel_id, "🔊 Successfully unmuted **" + target_user.username + "**.");
+                                } else {
+                                    bot.send_message(msg.channel_id, "failed to remove timeout or user is not timed out.");
+                                }
+                            });
+                        });
+                    });
+                });
+            },
+            "Moderation",
+            0,
+            stoatpp::permissions::TimeoutMembers
+        });
+
+        bot.register_command({
             "warn",
             {},
             "warn a member from the server.",
@@ -754,6 +902,55 @@ public:
                             {"{warns}", count_str}
                         };
                         send_action_response(bot, msg.server_id, msg.channel_id, "warn", tokens, "successfully warned **" + target_user.username + "** (" + count_str + ").");
+
+                        // ── Auto-Punishment Escalation Ladder ─────────────
+                        if (count == 3) {
+                            std::string iso_duration = helpers::get_future_iso_timestamp(3600);
+                            bot.timeout_member(msg.server_id, target_user.id, iso_duration, [&bot, msg, target_user](bool to_ok) {
+                                if (to_ok) {
+                                    log_moderation_action(bot, msg.server_id, "Timeout", bot.current_user().id, target_user.id, "Auto-escalation: reached 3 warnings", "1 hour", msg.channel_id);
+                                    bot.send_message(msg.channel_id, "🔇 **Auto-Escalation**: <@" + target_user.id + "> reached 3 warnings and was placed on timeout for 1 hour.");
+                                }
+                            });
+                        } else if (count == 5) {
+                            if (g_db) {
+                                auto jcfg_opt = g_db->get_jail_config(msg.server_id);
+                                if (jcfg_opt && !jcfg_opt->jail_role_id.empty()) {
+                                    std::string orig_roles = "";
+                                    for (size_t i = 0; i < target_member.roles.size(); ++i) {
+                                        orig_roles += target_member.roles[i] + (i + 1 < target_member.roles.size() ? "," : "");
+                                    }
+                                    nlohmann::json edit_fields;
+                                    edit_fields["roles"] = { jcfg_opt->jail_role_id };
+                                    bot.rest().edit_member(msg.server_id, target_user.id, edit_fields);
+
+                                    auto now_u = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                                    Database::ActiveJail jail;
+                                    jail.server_id = msg.server_id;
+                                    jail.user_id = target_user.id;
+                                    jail.roles = orig_roles;
+                                    jail.jailed_at = now_u;
+                                    jail.expires_at = 0;
+                                    g_db->add_active_jail(jail);
+
+                                    log_moderation_action(bot, msg.server_id, "Jail", bot.current_user().id, target_user.id, "Auto-escalation: reached 5 warnings", "indefinitely", msg.channel_id);
+                                    bot.send_message(msg.channel_id, "⛓️ **Auto-Escalation**: <@" + target_user.id + "> reached 5 warnings and was sent to jail.");
+                                } else {
+                                    std::string iso_duration = helpers::get_future_iso_timestamp(86400);
+                                    bot.timeout_member(msg.server_id, target_user.id, iso_duration, [&bot, msg, target_user](bool) {
+                                        log_moderation_action(bot, msg.server_id, "Timeout", bot.current_user().id, target_user.id, "Auto-escalation: reached 5 warnings (24h timeout)", "24 hours", msg.channel_id);
+                                        bot.send_message(msg.channel_id, "🔇 **Auto-Escalation**: <@" + target_user.id + "> reached 5 warnings and was placed on timeout for 24 hours.");
+                                    });
+                                }
+                            }
+                        } else if (count >= 7) {
+                            bot.ban_user(msg.server_id, target_user.id, "Auto-escalation: reached " + std::to_string(count) + " warnings", [&bot, msg, target_user, count](bool ban_ok) {
+                                if (ban_ok) {
+                                    log_moderation_action(bot, msg.server_id, "Ban", bot.current_user().id, target_user.id, "Auto-escalation: reached " + std::to_string(count) + " warnings", "", msg.channel_id);
+                                    bot.send_message(msg.channel_id, "🔨 **Auto-Escalation**: <@" + target_user.id + "> reached " + std::to_string(count) + " warnings and has been banned.");
+                                }
+                            });
+                        }
                     });
                 });
             },
@@ -1111,38 +1308,77 @@ public:
 
         bot.register_command({
             "purge",
-            {},
-            "bulk delete messages in the channel.",
+            {"clear", "clean"},
+            "bulk delete messages in the channel with optional filters.",
             "",
-            {"[amount]", "[@user]"},
+            {"[amount]", "[@user|bots|links|files|match <phrase>]", "[amount]"},
             [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
-                std::cout << "[bronx command] handling purge...\n";
+                std::cout << "[bronx command] handling smart purge...\n";
+                enum class PurgeFilter { All, User, Bots, Links, Files, Match };
+                PurgeFilter filter_mode = PurgeFilter::All;
                 int amount = 10;
-                std::string user_query = "";
-                
+                std::string target_user_query = "";
+                std::string match_keyword = "";
+
                 if (!args.empty()) {
-                    try {
-                        size_t pos;
-                        int val = std::stoi(args[0], &pos);
-                        if (pos == args[0].size()) {
-                            amount = val;
-                            if (args.size() > 1) {
-                                user_query = args[1];
-                            }
-                        } else {
-                            user_query = args[0];
-                            if (args.size() > 1) {
-                                try {
-                                    amount = std::stoi(args[1]);
-                                } catch (...) {}
-                            }
-                        }
-                    } catch (...) {
-                        user_query = args[0];
+                    std::string first = args[0];
+                    std::string first_lower = first;
+                    std::transform(first_lower.begin(), first_lower.end(), first_lower.begin(), ::tolower);
+
+                    if (first_lower == "bots" || first_lower == "bot") {
+                        filter_mode = PurgeFilter::Bots;
                         if (args.size() > 1) {
-                            try {
-                                amount = std::stoi(args[1]);
-                            } catch (...) {}
+                            try { amount = std::stoi(args[1]); } catch (...) {}
+                        }
+                    } else if (first_lower == "links" || first_lower == "link" || first_lower == "urls" || first_lower == "url") {
+                        filter_mode = PurgeFilter::Links;
+                        if (args.size() > 1) {
+                            try { amount = std::stoi(args[1]); } catch (...) {}
+                        }
+                    } else if (first_lower == "files" || first_lower == "file" || first_lower == "media" || first_lower == "embeds" || first_lower == "images") {
+                        filter_mode = PurgeFilter::Files;
+                        if (args.size() > 1) {
+                            try { amount = std::stoi(args[1]); } catch (...) {}
+                        }
+                    } else if (first_lower == "match" || first_lower == "contains") {
+                        filter_mode = PurgeFilter::Match;
+                        if (args.size() > 1) {
+                            match_keyword = args[1];
+                        }
+                        if (args.size() > 2) {
+                            try { amount = std::stoi(args[2]); } catch (...) {}
+                        }
+                    } else if (first_lower == "user") {
+                        filter_mode = PurgeFilter::User;
+                        if (args.size() > 1) {
+                            target_user_query = args[1];
+                        }
+                        if (args.size() > 2) {
+                            try { amount = std::stoi(args[2]); } catch (...) {}
+                        }
+                    } else {
+                        try {
+                            size_t pos;
+                            int val = std::stoi(first, &pos);
+                            if (pos == first.size()) {
+                                amount = val;
+                                if (args.size() > 1) {
+                                    filter_mode = PurgeFilter::User;
+                                    target_user_query = args[1];
+                                }
+                            } else {
+                                filter_mode = PurgeFilter::User;
+                                target_user_query = first;
+                                if (args.size() > 1) {
+                                    try { amount = std::stoi(args[1]); } catch (...) {}
+                                }
+                            }
+                        } catch (...) {
+                            filter_mode = PurgeFilter::User;
+                            target_user_query = first;
+                            if (args.size() > 1) {
+                                try { amount = std::stoi(args[1]); } catch (...) {}
+                            }
                         }
                     }
                 }
@@ -1152,11 +1388,11 @@ public:
                     return;
                 }
 
-                auto proceed_purge = [&bot, msg, amount](const std::string& target_user_id) {
+                auto proceed_purge = [&bot, msg, amount, filter_mode, match_keyword](const std::string& target_user_id) {
                     stoatpp::models::MessageQuery query;
-                    query.limit = target_user_id.empty() ? amount : 100;
+                    query.limit = (filter_mode == PurgeFilter::All) ? amount : 100;
 
-                    std::thread([&bot, msg, amount, target_user_id, query]() {
+                    std::thread([&bot, msg, amount, filter_mode, target_user_id, match_keyword, query]() {
                         auto res = bot.rest().get_messages(msg.channel_id, query);
                         if (!res.success() || !res.body.is_array()) {
                             bot.send_message(msg.channel_id, "failed to fetch messages for purge.");
@@ -1169,16 +1405,44 @@ public:
                             if (m.raw.value("pinned", false)) {
                                 continue;
                             }
-                            if (target_user_id.empty() || m.author == target_user_id) {
+
+                            bool matches = false;
+                            if (filter_mode == PurgeFilter::All) {
+                                matches = true;
+                            } else if (filter_mode == PurgeFilter::User) {
+                                matches = (m.author == target_user_id);
+                            } else if (filter_mode == PurgeFilter::Bots) {
+                                auto usr = bot.get_user(m.author);
+                                matches = (usr && usr->bot) || m.raw.contains("masquerade") || m.raw.contains("webhook");
+                            } else if (filter_mode == PurgeFilter::Links) {
+                                if (m.content) {
+                                    std::string s = *m.content;
+                                    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+                                    matches = (s.find("http://") != std::string::npos || s.find("https://") != std::string::npos ||
+                                               s.find("stoat.chat/") != std::string::npos || s.find("discord.gg/") != std::string::npos);
+                                }
+                            } else if (filter_mode == PurgeFilter::Files) {
+                                matches = (!m.attachments.empty() || !m.embeds.empty());
+                            } else if (filter_mode == PurgeFilter::Match) {
+                                if (m.content && !match_keyword.empty()) {
+                                    std::string s = *m.content;
+                                    std::string q = match_keyword;
+                                    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+                                    std::transform(q.begin(), q.end(), q.begin(), ::tolower);
+                                    matches = (s.find(q) != std::string::npos);
+                                }
+                            }
+
+                            if (matches) {
                                 ids.push_back(m.id);
-                                if (!target_user_id.empty() && ids.size() >= static_cast<size_t>(amount)) {
+                                if (ids.size() >= static_cast<size_t>(amount)) {
                                     break;
                                 }
                             }
                         }
 
                         if (ids.empty()) {
-                            bot.send_message(msg.channel_id, "no messages found to delete.");
+                            bot.send_message(msg.channel_id, "no matching messages found to delete.");
                             return;
                         }
 
@@ -1197,8 +1461,8 @@ public:
                     }).detach();
                 };
 
-                if (!user_query.empty()) {
-                    helpers::resolve_user(bot, msg.server_id, user_query, [proceed_purge, &bot, msg](stoatpp::models::User user, stoatpp::models::Member member, bool success) {
+                if (filter_mode == PurgeFilter::User && !target_user_query.empty()) {
+                    helpers::resolve_user(bot, msg.server_id, target_user_query, [proceed_purge, &bot, msg](stoatpp::models::User user, stoatpp::models::Member, bool success) {
                         if (!success) {
                             bot.send_message(msg.channel_id, "could not resolve target user for purge.");
                             return;
@@ -1211,6 +1475,187 @@ public:
             },
             "Moderation",
             stoatpp::permissions::ManageMessages
+        });
+
+        auto resolve_lock_target = [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args, size_t& reason_start_idx) -> std::string {
+            reason_start_idx = 0;
+            if (!args.empty()) {
+                std::string cand = helpers::clean_channel_id(args[0]);
+                if (!cand.empty() && cand.size() == 26) {
+                    auto srv = bot.get_server(msg.server_id);
+                    auto ch = bot.get_channel(cand);
+                    bool in_server = (srv && std::find(srv->channels.begin(), srv->channels.end(), cand) != srv->channels.end());
+                    if (ch || in_server) {
+                        reason_start_idx = 1;
+                        return cand;
+                    }
+                }
+            }
+            return msg.channel_id;
+        };
+
+        bot.register_command({
+            "lock",
+            {},
+            "lock a channel, preventing @everyone from sending messages.",
+            "[#channel] [reason]",
+            {"[#channel]", "[reason]"},
+            [resolve_lock_target](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                std::cout << "[bronx command] handling lock...\n";
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, stoatpp::permissions::ManageChannels) &&
+                        !bot.has_permission(*server, *mem_opt, stoatpp::permissions::ManageServer)) {
+                        bot.send_message(msg.channel_id, "permission error: you need Manage Channels or Manage Server permission to lock a channel.");
+                        return;
+                    }
+                }
+
+                size_t reason_idx = 0;
+                std::string target_channel = resolve_lock_target(bot, msg, args, reason_idx);
+
+                std::string reason = "no reason provided";
+                if (args.size() > reason_idx) {
+                    reason = "";
+                    for (size_t i = reason_idx; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
+
+                std::thread([&bot, msg, target_channel, reason]() {
+                    int64_t deny_mask = stoatpp::permissions::SendMessages | stoatpp::permissions::AddReactions;
+                    auto res = bot.rest().set_channel_default_permission(target_channel, deny_mask);
+                    if (res.success()) {
+                        log_moderation_action(bot, msg.server_id, "Lock", msg.author.id, target_channel, reason, "", msg.channel_id);
+                        bot.send_message(msg.channel_id, "🔒 **Channel Locked** (<#" + target_channel + ">). Default message sending and reactions disabled.\n*Reason: " + reason + "*");
+                    } else {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to lock <#" + target_channel + ">: " + res.error_message());
+                    }
+                }).detach();
+            },
+            "Moderation",
+            stoatpp::permissions::ManageChannels
+        });
+
+        bot.register_command({
+            "unlock",
+            {},
+            "unlock a channel, restoring message permissions.",
+            "[#channel]",
+            {"[#channel]"},
+            [resolve_lock_target](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                std::cout << "[bronx command] handling unlock...\n";
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, stoatpp::permissions::ManageChannels) &&
+                        !bot.has_permission(*server, *mem_opt, stoatpp::permissions::ManageServer)) {
+                        bot.send_message(msg.channel_id, "permission error: you need Manage Channels or Manage Server permission to unlock a channel.");
+                        return;
+                    }
+                }
+
+                size_t dummy_idx = 0;
+                std::string target_channel = resolve_lock_target(bot, msg, args, dummy_idx);
+
+                std::thread([&bot, msg, target_channel]() {
+                    auto res = bot.rest().delete_channel_permission(target_channel, "default");
+                    if (res.success()) {
+                        log_moderation_action(bot, msg.server_id, "Unlock", msg.author.id, target_channel, "", "", msg.channel_id);
+                        bot.send_message(msg.channel_id, "🔓 **Channel Unlocked** (<#" + target_channel + ">). Default permissions restored.");
+                    } else {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to unlock <#" + target_channel + ">: " + res.error_message());
+                    }
+                }).detach();
+            },
+            "Moderation",
+            stoatpp::permissions::ManageChannels
+        });
+
+        bot.register_command({
+            "lockdown",
+            {},
+            "lock all channels across the server (emergency lockdown).",
+            "[reason]",
+            {"[reason]"},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                std::cout << "[bronx command] handling lockdown...\n";
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                auto server = bot.get_server(msg.server_id);
+                if (!server) {
+                    bot.send_message(msg.channel_id, "failed to fetch server info.");
+                    return;
+                }
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (mem_opt && !bot.has_permission(*server, *mem_opt, stoatpp::permissions::ManageServer)) {
+                    bot.send_message(msg.channel_id, "permission error: you need Manage Server permission to initiate a server lockdown.");
+                    return;
+                }
+
+                std::string reason = "no reason provided";
+                if (!args.empty()) {
+                    reason = "";
+                    for (size_t i = 0; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
+
+                auto channels = server->channels;
+                std::thread([&bot, msg, channels, reason]() {
+                    int64_t deny_mask = stoatpp::permissions::SendMessages | stoatpp::permissions::AddReactions;
+                    int locked_count = 0;
+                    for (const auto& ch_id : channels) {
+                        auto res = bot.rest().set_channel_default_permission(ch_id, deny_mask);
+                        if (res.success()) locked_count++;
+                    }
+                    log_moderation_action(bot, msg.server_id, "Lockdown", msg.author.id, msg.server_id, reason, std::to_string(locked_count) + " channels", msg.channel_id);
+                    bot.send_message(msg.channel_id, "🚨 **Server Lockdown Activated.** Locked **" + std::to_string(locked_count) + "/" + std::to_string(channels.size()) + "** channels.\n*Reason: " + reason + "*");
+                }).detach();
+            },
+            "Moderation",
+            stoatpp::permissions::ManageServer
+        });
+
+        bot.register_command({
+            "unlockdown",
+            {},
+            "unlock all channels across the server after a lockdown.",
+            "",
+            {},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>&) {
+                std::cout << "[bronx command] handling unlockdown...\n";
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                auto server = bot.get_server(msg.server_id);
+                if (!server) {
+                    bot.send_message(msg.channel_id, "failed to fetch server info.");
+                    return;
+                }
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (mem_opt && !bot.has_permission(*server, *mem_opt, stoatpp::permissions::ManageServer)) {
+                    bot.send_message(msg.channel_id, "permission error: you need Manage Server permission to lift a server lockdown.");
+                    return;
+                }
+
+                auto channels = server->channels;
+                std::thread([&bot, msg, channels]() {
+                    int unlocked_count = 0;
+                    for (const auto& ch_id : channels) {
+                        auto res = bot.rest().delete_channel_permission(ch_id, "default");
+                        if (res.success()) unlocked_count++;
+                    }
+                    log_moderation_action(bot, msg.server_id, "Unlockdown", msg.author.id, msg.server_id, "", std::to_string(unlocked_count) + " channels", msg.channel_id);
+                    bot.send_message(msg.channel_id, "🔓 **Server Lockdown Lifted.** Restored permissions across **" + std::to_string(unlocked_count) + "/" + std::to_string(channels.size()) + "** channels.");
+                }).detach();
+            },
+            "Moderation",
+            stoatpp::permissions::ManageServer
         });
         bot.register_command({
             "pin",
@@ -1450,8 +1895,9 @@ public:
                 };
 
                 auto is_valid_action = [](const std::string& act) {
-                    return act == "ban" || act == "kick" || act == "timeout" || act == "purge" ||
-                           act == "warn" || act == "jail" || act == "unjail" || act == "jail_invoke";
+                    return act == "ban" || act == "softban" || act == "kick" || act == "timeout" || act == "purge" ||
+                           act == "warn" || act == "jail" || act == "unjail" || act == "jail_invoke" ||
+                           act == "lock" || act == "unlock";
                 };
 
                 if (sub == "list") {
@@ -1658,7 +2104,7 @@ public:
 
         bot.register_command({
             "modlogs",
-            {"ml"},
+            {"ml", "warns", "warnings"},
             "view or manage moderation history for a user.",
             "modlogs <@user|id/remove> [actions/id]",
             {"<@user|id>", "[actions]"},
@@ -1744,27 +2190,42 @@ public:
 
         bot.register_command({
             "slowmode",
-            {},
+            {"sm"},
             "set channel slowmode (0 to disable).",
             "",
             {"<seconds>", "[channel]"},
             [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
                 if (args.empty()) {
-                    bot.send_message(msg.channel_id, "usage: `.slowmode <seconds> [channel]`");
+                    bot.send_message(msg.channel_id, "usage: `.slowmode <duration|off> [channel]` (e.g. `5s`, `2m`, `0`, `off`)");
                     return;
                 }
 
-
                 int seconds = 0;
-                try {
-                    seconds = std::stoi(args[0]);
-                    if (seconds < 0) {
-                        bot.send_message(msg.channel_id, "duration cannot be negative.");
+                std::string arg0 = args[0];
+                for (auto& c : arg0) c = std::tolower(c);
+                if (arg0 == "off" || arg0 == "none" || arg0 == "disable") {
+                    seconds = 0;
+                } else {
+                    int mult = 1;
+                    if (!arg0.empty() && arg0.back() == 's') {
+                        arg0.pop_back();
+                    } else if (!arg0.empty() && arg0.back() == 'm') {
+                        arg0.pop_back();
+                        mult = 60;
+                    } else if (!arg0.empty() && arg0.back() == 'h') {
+                        arg0.pop_back();
+                        mult = 3600;
+                    }
+                    try {
+                        seconds = std::stoi(arg0) * mult;
+                        if (seconds < 0) {
+                            bot.send_message(msg.channel_id, "duration cannot be negative.");
+                            return;
+                        }
+                    } catch (...) {
+                        bot.send_message(msg.channel_id, "invalid duration. specify seconds/minutes or off (e.g. `5s`, `2m`, `0`, `off`).");
                         return;
                     }
-                } catch (...) {
-                    bot.send_message(msg.channel_id, "invalid duration. please specify duration in seconds.");
-                    return;
                 }
 
                 std::string target_channel = msg.channel_id;
@@ -1795,6 +2256,413 @@ public:
             },
             "Moderation",
             stoatpp::permissions::ManageChannels
+        });
+
+        // --- .case <id> ---
+        bot.register_command({
+            "case",
+            {"modcase"},
+            "view details for a moderation case.",
+            "<id>",
+            {"<id>"},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "usage: `.case <case_id>` (or `.case delete <case_id>`)");
+                    return;
+                }
+
+                if (args[0] == "delete" || args[0] == "del" || args[0] == "rm") {
+                    if (args.size() < 2) {
+                        bot.send_message(msg.channel_id, "usage: `.case delete <case_id>`");
+                        return;
+                    }
+                    int cid = 0;
+                    try { cid = std::stoi(args[1]); } catch (...) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid case ID.");
+                        return;
+                    }
+                    if (g_db && g_db->delete_moderation_action(msg.server_id, cid)) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Deleted moderation case **#" + std::to_string(cid) + "**.");
+                    } else {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to delete case or case not found.");
+                    }
+                    return;
+                }
+
+                int case_id = 0;
+                try {
+                    case_id = std::stoi(args[0]);
+                } catch (...) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid case ID.");
+                    return;
+                }
+
+                auto c_opt = g_db->get_moderation_case(msg.server_id, case_id);
+                if (!c_opt) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Case #" + std::to_string(case_id) + " not found.");
+                    return;
+                }
+
+                const auto& c = *c_opt;
+                stoatpp::models::MessagePayload payload;
+                stoatpp::models::Embed embed;
+                embed.set_title("Case #" + std::to_string(c.id) + " | " + c.action);
+
+                std::string col = "#5865F2";
+                if (c.action == "Ban" || c.action == "Softban" || c.action == "Massban") col = "#ED4245";
+                else if (c.action == "Kick") col = "#E67E22";
+                else if (c.action == "Timeout" || c.action == "Jail") col = "#FEE75C";
+                else if (c.action == "Warn") col = "#57F287";
+                embed.set_colour(col);
+
+                std::string desc = "**Offender:** <@" + c.target_id + "> (`" + c.target_id + "`)\n";
+                desc += "**Moderator:** <@" + c.moderator_id + "> (`" + c.moderator_id + "`)\n";
+                desc += "**Reason:** " + (c.reason.empty() ? "*No reason provided*" : c.reason) + "\n";
+                if (!c.extra_details.empty()) {
+                    desc += "**Details:** " + c.extra_details + "\n";
+                }
+                if (!c.channel_id.empty()) {
+                    desc += "**Channel:** <#" + c.channel_id + ">\n";
+                }
+                if (c.created_at > 0) {
+                    desc += "**Timestamp:** <t:" + std::to_string(c.created_at) + ":F> (<t:" + std::to_string(c.created_at) + ":R>)\n";
+                }
+                embed.set_description(desc);
+                payload.add_embed(embed);
+                bot.send_message(msg.channel_id, payload);
+            },
+            "Moderation",
+            stoatpp::permissions::KickMembers
+        });
+
+        // --- .reason <id> <new_reason> ---
+        bot.register_command({
+            "reason",
+            {},
+            "update the reason for an existing moderation case.",
+            "<id> <new_reason>",
+            {"<id>", "<new_reason>"},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.size() < 2) {
+                    bot.send_message(msg.channel_id, "usage: `.reason <case_id> <new_reason>`");
+                    return;
+                }
+
+                int case_id = 0;
+                try {
+                    case_id = std::stoi(args[0]);
+                } catch (...) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid case ID.");
+                    return;
+                }
+
+                auto c_opt = g_db->get_moderation_case(msg.server_id, case_id);
+                if (!c_opt) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Case #" + std::to_string(case_id) + " not found.");
+                    return;
+                }
+
+                std::string new_reason;
+                for (size_t i = 1; i < args.size(); ++i) {
+                    new_reason += args[i] + (i + 1 < args.size() ? " " : "");
+                }
+
+                if (g_db->update_moderation_case_reason(msg.server_id, case_id, new_reason)) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Updated reason for **Case #" + std::to_string(case_id) + "** to: *" + new_reason + "*");
+                } else {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to update case reason.");
+                }
+            },
+            "Moderation",
+            stoatpp::permissions::KickMembers
+        });
+
+        // --- .note <user> <text> ---
+        bot.register_command({
+            "note",
+            {"addnote"},
+            "add a private staff note on a user.",
+            "<user> <note>",
+            {"<user>", "<note>"},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.size() < 2) {
+                    bot.send_message(msg.channel_id, "usage: `.note <user> <note_text>`");
+                    return;
+                }
+
+                std::string target_id = helpers::clean_user_id(args[0]);
+                if (target_id.empty()) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid user provided.");
+                    return;
+                }
+
+                std::string note_text;
+                for (size_t i = 1; i < args.size(); ++i) {
+                    note_text += args[i] + (i + 1 < args.size() ? " " : "");
+                }
+
+                if (g_db->add_moderation_note(msg.server_id, target_id, msg.author.id, note_text)) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Staff note recorded for <@" + target_id + ">.");
+                } else {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to save staff note.");
+                }
+            },
+            "Moderation",
+            stoatpp::permissions::KickMembers
+        });
+
+        // --- .notes <user> ---
+        bot.register_command({
+            "notes",
+            {},
+            "view staff notes recorded on a user.",
+            "<user>",
+            {"<user>"},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "usage: `.notes <user>`");
+                    return;
+                }
+
+                std::string target_id = helpers::clean_user_id(args[0]);
+                if (target_id.empty()) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid user provided.");
+                    return;
+                }
+
+                auto notes = g_db->get_moderation_notes(msg.server_id, target_id);
+                if (notes.empty()) {
+                    bot.send_message(msg.channel_id, "ℹ️ No staff notes found for <@" + target_id + ">.");
+                    return;
+                }
+
+                stoatpp::models::MessagePayload payload;
+                stoatpp::models::Embed embed;
+                embed.set_title("Staff Notes — " + target_id);
+                embed.set_colour("#3498DB");
+
+                std::string desc = "Notes for <@" + target_id + "> (" + std::to_string(notes.size()) + " total):\n\n";
+                for (const auto& n : notes) {
+                    desc += "**Note #" + std::to_string(n.id) + "** — by <@" + n.moderator_id + ">";
+                    if (n.created_at > 0) {
+                        desc += " (<t:" + std::to_string(n.created_at) + ":R>)";
+                    }
+                    desc += "\n" + n.note + "\n\n";
+                    if (desc.size() > 3800) {
+                        desc += "... *(more notes truncated)*\n";
+                        break;
+                    }
+                }
+                embed.set_description(desc);
+                payload.add_embed(embed);
+                bot.send_message(msg.channel_id, payload);
+            },
+            "Moderation",
+            stoatpp::permissions::KickMembers
+        });
+
+        // --- .delnote <id> ---
+        bot.register_command({
+            "delnote",
+            {"removenote"},
+            "delete a staff note by note ID.",
+            "<id>",
+            {"<id>"},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "usage: `.delnote <note_id>`");
+                    return;
+                }
+
+                int note_id = 0;
+                try {
+                    note_id = std::stoi(args[0]);
+                } catch (...) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid note ID.");
+                    return;
+                }
+
+                if (g_db->delete_moderation_note(msg.server_id, note_id)) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Deleted note **#" + std::to_string(note_id) + "**.");
+                } else {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to delete note or note not found.");
+                }
+            },
+            "Moderation",
+            stoatpp::permissions::KickMembers
+        });
+
+        // --- .editnote <id> <new_text> ---
+        bot.register_command({
+            "editnote",
+            {},
+            "edit an existing staff note by note ID.",
+            "<id> <new_text>",
+            {"<id>", "<new_text>"},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.size() < 2) {
+                    bot.send_message(msg.channel_id, "usage: `.editnote <note_id> <new text...>`");
+                    return;
+                }
+
+                int note_id = 0;
+                try {
+                    note_id = std::stoi(args[0]);
+                } catch (...) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid note ID.");
+                    return;
+                }
+
+                std::string new_note;
+                for (size_t i = 1; i < args.size(); ++i) {
+                    new_note += args[i] + (i + 1 < args.size() ? " " : "");
+                }
+
+                if (g_db && g_db->update_moderation_note(msg.server_id, note_id, new_note)) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Updated staff note **#" + std::to_string(note_id) + "**.");
+                } else {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to update note or note not found.");
+                }
+            },
+            "Moderation",
+            stoatpp::permissions::KickMembers
+        });
+
+        // --- .delcase <id> ---
+        bot.register_command({
+            "delcase",
+            {"rmcase", "deletecase"},
+            "delete a moderation case by case ID.",
+            "<id>",
+            {"<id>"},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "usage: `.delcase <case_id>`");
+                    return;
+                }
+
+                int case_id = 0;
+                try {
+                    case_id = std::stoi(args[0]);
+                } catch (...) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " invalid case ID.");
+                    return;
+                }
+
+                if (g_db && g_db->delete_moderation_action(msg.server_id, case_id)) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " Deleted moderation case **#" + std::to_string(case_id) + "**.");
+                } else {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " failed to delete case or case not found.");
+                }
+            },
+            "Moderation",
+            stoatpp::permissions::BanMembers
+        });
+
+        // --- .massban <id1> <id2> ... [reason: <text>] ---
+        bot.register_command({
+            "massban",
+            {},
+            "ban multiple user IDs in one sweep (up to 50 users).",
+            "<id1> <id2> ... [reason: <text>]",
+            {"<id1>..."},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "this command can only be used inside a server.");
+                    return;
+                }
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "usage: `.massban <user_id_1> <user_id_2> ... [reason: <reason>]`");
+                    return;
+                }
+
+                std::vector<std::string> user_ids;
+                std::string reason = "Massban by " + msg.author.username;
+
+                bool parsing_reason = false;
+                for (const auto& arg : args) {
+                    if (!parsing_reason && (arg.rfind("reason:", 0) == 0 || arg.rfind("r:", 0) == 0)) {
+                        parsing_reason = true;
+                        size_t colon_pos = arg.find(':');
+                        std::string r_part = arg.substr(colon_pos + 1);
+                        if (!r_part.empty()) reason = r_part;
+                        else reason = "";
+                    } else if (parsing_reason) {
+                        reason += (reason.empty() ? "" : " ") + arg;
+                    } else {
+                        std::string uid = helpers::clean_user_id(arg);
+                        if (!uid.empty() && uid != bot.current_user().id && uid != msg.author.id) {
+                            user_ids.push_back(uid);
+                        }
+                    }
+                }
+
+                if (user_ids.empty()) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " no valid user IDs specified.");
+                    return;
+                }
+
+                if (user_ids.size() > 50) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " max 50 user IDs allowed per massban.");
+                    return;
+                }
+
+                int banned_count = 0;
+                int failed_count = 0;
+
+                for (const auto& uid : user_ids) {
+                    auto res = bot.rest().ban_user(msg.server_id, uid, reason);
+                    if (res.success()) {
+                        banned_count++;
+                        log_moderation_action(bot, msg.server_id, "Massban", msg.author.id, uid, reason, "", msg.channel_id);
+                    } else {
+                        failed_count++;
+                    }
+                }
+
+                stoatpp::models::MessagePayload payload;
+                stoatpp::models::Embed embed;
+                embed.set_title("Massban Execution");
+                embed.set_colour("#ED4245");
+                std::string desc = "Successfully banned **" + std::to_string(banned_count) + "** user(s).\n";
+                if (failed_count > 0) {
+                    desc += "Failed to ban **" + std::to_string(failed_count) + "** user(s) (hierarchy or invalid ID).\n";
+                }
+                desc += "**Reason:** " + reason;
+                embed.set_description(desc);
+                payload.add_embed(embed);
+                bot.send_message(msg.channel_id, payload);
+            },
+            "Moderation",
+            stoatpp::permissions::BanMembers
         });        // Register on_message_react for modlogs pagination
         bot.on_message_react([this, &bot](const stoatpp::events::MessageReact& e) {
             if (e.user_id == bot.current_user().id)

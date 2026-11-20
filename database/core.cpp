@@ -103,6 +103,7 @@ connected:
     }
 
     std::cout << "[bronx db] database successfully initialized.\n";
+    start_telemetry_flusher();
     return true;
   }
 

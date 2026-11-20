@@ -368,6 +368,10 @@ namespace bronx {
           xp.level = row[3] ? std::stoul(row[3]) : 1;
           xp.last_message_xp = row[4];
           mysql_free_result(res);
+          {
+            std::lock_guard<std::shared_mutex> clock(user_xp_cache_mutex_);
+            user_xp_cache_[server_id + ":" + user_id] = {xp.total_xp, xp.level};
+          }
           return xp;
         }
         mysql_free_result(res);
@@ -384,9 +388,49 @@ namespace bronx {
       return false;
 
     leveled_up = false;
+    std::string cache_key = server_id + ":" + user_id;
     std::string esc_uid = escape_string(user_id);
     std::string esc_sid = escape_string(server_id);
     std::string val_xp = std::to_string(xp_amount);
+
+    bool in_cache = false;
+    UserXPCacheEntry cached_entry;
+    {
+      std::shared_lock<std::shared_mutex> clock(user_xp_cache_mutex_);
+      auto it = user_xp_cache_.find(cache_key);
+      if (it != user_xp_cache_.end()) {
+        in_cache = true;
+        cached_entry = it->second;
+      }
+    }
+
+    if (in_cache) {
+      uint64_t next_total = cached_entry.total_xp + xp_amount;
+      uint32_t calc_level = calculate_level_from_xp(next_total);
+      if (calc_level > cached_entry.level) {
+        leveled_up = true;
+        new_level = calc_level;
+        std::string q = "INSERT INTO user_xp (user_id, server_id, total_xp, level, last_message_xp) "
+                        "VALUES ('" + esc_uid + "', '" + esc_sid + "', " + std::to_string(next_total) +
+                        ", " + std::to_string(new_level) + ", NOW()) "
+                        "ON DUPLICATE KEY UPDATE total_xp = " + std::to_string(next_total) +
+                        ", level = " + std::to_string(new_level) + ", last_message_xp = NOW()";
+        if (mysql_query(mysql_, q.c_str())) return false;
+      } else {
+        new_level = cached_entry.level;
+        std::string q = "INSERT INTO user_xp (user_id, server_id, total_xp, level, last_message_xp) "
+                        "VALUES ('" + esc_uid + "', '" + esc_sid + "', " + val_xp +
+                        ", 1, NOW()) "
+                        "ON DUPLICATE KEY UPDATE total_xp = total_xp + " + val_xp + ", last_message_xp = NOW()";
+        if (mysql_query(mysql_, q.c_str())) return false;
+      }
+
+      {
+        std::lock_guard<std::shared_mutex> clock(user_xp_cache_mutex_);
+        user_xp_cache_[cache_key] = {next_total, new_level};
+      }
+      return true;
+    }
 
     // Upsert the XP row
     std::string q = "INSERT INTO user_xp (user_id, server_id, total_xp, level, "
@@ -419,9 +463,38 @@ namespace bronx {
                 esc_sid + "'";
             mysql_query(mysql_, q_upd.c_str());
           }
+          {
+            std::lock_guard<std::shared_mutex> clock(user_xp_cache_mutex_);
+            user_xp_cache_[cache_key] = {total_xp, new_level};
+          }
         }
         mysql_free_result(res);
       }
+    }
+    return true;
+  }
+
+  bool Database::set_user_xp(const std::string &user_id,
+                             const std::string &server_id, uint64_t total_xp,
+                             uint32_t level) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return false;
+
+    std::string esc_uid = escape_string(user_id);
+    std::string esc_sid = escape_string(server_id);
+    std::string q = "INSERT INTO user_xp (user_id, server_id, total_xp, level) "
+                    "VALUES ('" + esc_uid + "', '" + esc_sid + "', " +
+                    std::to_string(total_xp) + ", " + std::to_string(level) +
+                    ") ON DUPLICATE KEY UPDATE total_xp = " +
+                    std::to_string(total_xp) +
+                    ", level = " + std::to_string(level);
+    if (mysql_query(mysql_, q.c_str()) != 0)
+      return false;
+
+    {
+      std::lock_guard<std::shared_mutex> clock(user_xp_cache_mutex_);
+      user_xp_cache_[server_id + ":" + user_id] = {total_xp, level};
     }
     return true;
   }
@@ -430,7 +503,19 @@ namespace bronx {
     std::lock_guard<std::mutex> lock(db_mutex_);
     std::string q = "DELETE FROM user_xp WHERE server_id = '" +
                     escape_string(server_id) + "'";
-    return mysql_query(mysql_, q.c_str()) == 0;
+    bool ok = (mysql_query(mysql_, q.c_str()) == 0);
+    if (ok) {
+      std::lock_guard<std::shared_mutex> clock(user_xp_cache_mutex_);
+      std::string prefix = server_id + ":";
+      for (auto it = user_xp_cache_.begin(); it != user_xp_cache_.end();) {
+        if (it->first.rfind(prefix, 0) == 0) {
+          it = user_xp_cache_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    return ok;
   }
 
   bool Database::reset_user_guild_xp(const std::string &user_id,
@@ -439,7 +524,12 @@ namespace bronx {
     std::string q = "DELETE FROM user_xp WHERE user_id = '" +
                     escape_string(user_id) + "' AND server_id = '" +
                     escape_string(server_id) + "'";
-    return mysql_query(mysql_, q.c_str()) == 0;
+    bool ok = (mysql_query(mysql_, q.c_str()) == 0);
+    if (ok) {
+      std::lock_guard<std::shared_mutex> clock(user_xp_cache_mutex_);
+      user_xp_cache_.erase(server_id + ":" + user_id);
+    }
+    return ok;
   }
 
   std::vector<UserXP> Database::get_server_xp_leaderboard(const std::string &server_id,

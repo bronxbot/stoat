@@ -3,25 +3,69 @@
 #include "stoatpp/bot_module.h"
 #include "stoatpp/pulse_voice.h"
 #include "stoatpp/voice_connection.h"
-#include <httplib.h>
+#include "voice_music.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <fcntl.h>
 #include <iostream>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <poll.h>
+#include <signal.h>
 #include <sstream>
+#include <spawn.h>
 #include <string>
+#include <exception>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <thread>
+#include <unordered_map>
 #include <vector>
+#include <unistd.h>
 
 namespace bronx::cogs {
 
 class VoiceModule : public stoatpp::bot_module {
 public:
+  ~VoiceModule() override {
+    {
+      std::lock_guard<std::mutex> lock(async_mutex_);
+      for (auto &task : async_tasks_) {
+        if (task.thread.joinable())
+          task.thread.join();
+      }
+    }
+    if (music_)
+      music_->shutdown();
+    {
+      std::lock_guard<std::mutex> lock(voice_mutex_);
+      voice_.disconnect();
+    }
+    {
+      std::lock_guard<std::mutex> lock(pulse_mutex_);
+      pulse_.shutdown();
+    }
+  }
+
   void register_handlers(stoatpp::cluster &bot) override {
+    music_ = std::make_unique<VoiceMusicPlayer>(
+        [this](const int16_t *samples, size_t count) {
+          std::lock_guard<std::mutex> lock(voice_mutex_);
+          return voice_.is_connected() && voice_.write_pcm(samples, count);
+        },
+        [&bot](const std::string &channel_id, const std::string &message) {
+          bot.send_message(channel_id, message);
+        });
+
     // Hook PulseAudio to WebRTC voice stream
     pulse_.set_audio_monitor([this](const int16_t* samples, size_t count) {
+      std::lock_guard<std::mutex> lock(voice_mutex_);
       if (voice_.is_connected()) {
         voice_.write_pcm(samples, count);
       }
@@ -29,188 +73,129 @@ public:
 
     // 0. Listen to voice state updates to play join/leave chimes and log active status
     bot.on_voice_state_update([this, &bot](const stoatpp::events::VoiceStateUpdate &ev) {
-      std::cout << "[bronx voice_state_update] User: " << ev.user_id 
-                << " | Channel: " << ev.channel_id 
-                << " | Joined: " << (ev.joined ? "TRUE" : "FALSE") << "\n";
-      
-      // If we are currently connected to this voice channel, play a chime locally
-      if (!current_channel_id_.empty() && ev.channel_id == current_channel_id_) {
-        std::cout << "[bronx voice_state_update] Playing " << (ev.joined ? "join" : "leave") << " chime.\n";
+      {
+        std::lock_guard<std::mutex> lock(voice_state_mutex_);
+        if (ev.joined) {
+          user_voice_channels_[ev.user_id] = ev.channel_id;
+        } else {
+          auto it = user_voice_channels_.find(ev.user_id);
+          if (it != user_voice_channels_.end() &&
+              (ev.channel_id.empty() || it->second == ev.channel_id)) {
+            user_voice_channels_.erase(it);
+          }
+        }
+      }
+
+      if (!ev.joined && ev.user_id == bot.current_user().id) {
+        std::lock_guard<std::mutex> operation_lock(voice_operation_mutex_);
+        bool left_current_channel = false;
+        {
+          std::lock_guard<std::mutex> lock(voice_mutex_);
+          left_current_channel =
+              !current_channel_id_.empty() &&
+              (ev.channel_id.empty() || current_channel_id_ == ev.channel_id);
+        }
+        if (left_current_channel) {
+          music_->stop();
+          {
+            std::lock_guard<std::mutex> lock(voice_mutex_);
+            voice_.disconnect();
+            current_channel_id_.clear();
+          }
+          std::lock_guard<std::mutex> lock(pulse_mutex_);
+          pulse_.shutdown();
+        }
+      }
+
+      bool should_play_chime = false;
+      {
+        std::lock_guard<std::mutex> lock(voice_mutex_);
+        should_play_chime = !current_channel_id_.empty() &&
+                            ev.channel_id == current_channel_id_;
+      }
+      if (should_play_chime) {
+        std::lock_guard<std::mutex> lock(pulse_mutex_);
         pulse_.play_chime(ev.joined);
       }
     });
 
-    // 1. Join voice channel command
+    // 1. Join the caller's voice channel or a named/explicit voice channel.
     bot.register_command(
         {"join",
          {},
-         "join a voice channel on the server.",
+         "join your voice channel, or a specified voice channel.",
          "join [channel_id_or_name]",
          {"[channel_id_or_name]"},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
-            const std::vector<std::string> &args) {
-           std::cout << "[bronx command] handling join...\n";
+                const std::vector<std::string> &args) {
            if (msg.server_id.empty()) {
-             bot.send_message(msg.channel_id, "[Voice] This command can only be used in a server.");
+             bot.send_message(msg.channel_id,
+                              "[Voice] This command can only be used in a server.");
              return;
            }
 
-           std::string input_arg = "";
-           if (!args.empty()) {
-             input_arg = args[0];
-             if (input_arg.rfind("<#", 0) == 0 && input_arg.back() == '>') {
-               input_arg = input_arg.substr(2, input_arg.size() - 3);
-             }
-           }
-
-           std::thread([this, &bot, msg, args, input_arg]() {
-             std::string target_channel_id = "";
-             std::string target_channel_name = "";
-
-             std::cout << "[bronx join] Resolving channel: " << (input_arg.empty() ? "(none)" : input_arg) << "\n";
-
-             if (input_arg.size() == 26) {
-               std::cout << "[bronx join] Looking up direct channel ID via REST...\n";
-               auto res = bot.rest().get_channel(input_arg);
-               if (res.success()) {
-                 auto c = stoatpp::models::Channel::from_json(res.body);
-                 target_channel_id = c.id;
-                 target_channel_name = c.name ? *c.name : "Channel";
-                 std::cout << "[bronx join] Found channel: " << target_channel_name << " (" << target_channel_id << ")\n";
-               } else {
-                 std::cout << "[bronx join] REST lookup failed, using direct ID: " << input_arg << "\n";
-                 target_channel_id = input_arg;
-                 target_channel_name = "Channel (" + input_arg + ")";
-               }
-             } else {
-               std::cout << "[bronx join] Searching in local cache...\n";
-               std::vector<stoatpp::models::Channel> voice_channels;
-               for (const auto &c : bot.get_channels()) {
-                 if (c.server && *c.server == msg.server_id && 
-                     (c.channel_type == "VoiceChannel" || c.channel_type == "TextChannel")) {
-                   voice_channels.push_back(c);
-                 }
-               }
-
-               std::cout << "[bronx join] Cached channels found for this server: " << voice_channels.size() << "\n";
-
-               if (voice_channels.empty()) {
-                 std::cout << "[bronx join] Error: local cache has no voice/text channels for this server.\n";
-                 bot.send_message(msg.channel_id, "[Voice] No voice channels found in local cache.");
-                 return;
-               }
-
-               if (args.empty()) {
-                 target_channel_id = voice_channels[0].id;
-                 target_channel_name = voice_channels[0].name ? *voice_channels[0].name : "Voice Channel";
-               } else {
-                 std::string search = args[0];
-                 std::transform(search.begin(), search.end(), search.begin(), ::tolower);
-
-                 for (const auto &vc : voice_channels) {
-                   std::string vc_name = vc.name ? *vc.name : "";
-                   std::string vc_name_lower = vc_name;
-                   std::transform(vc_name_lower.begin(), vc_name_lower.end(), vc_name_lower.begin(), ::tolower);
-
-                   if (vc_name_lower.find(search) != std::string::npos) {
-                     target_channel_id = vc.id;
-                     target_channel_name = vc_name;
-                     break;
-                   }
-                 }
-               }
-             }
-
-             if (target_channel_id.empty()) {
-               std::cout << "[bronx join] Error: could not resolve target channel.\n";
-               bot.send_message(msg.channel_id, "[Voice] Could not find a matching channel.");
+           launch_task(bot, msg.channel_id, [this, &bot, msg, args] {
+             std::string channel_id;
+             std::string channel_name;
+             std::string error;
+             if (!resolve_voice_channel(bot, msg, args, channel_id,
+                                        channel_name, error)) {
+               bot.send_message(msg.channel_id, "[Voice] " + error);
                return;
              }
 
-             std::cout << "[bronx join] Joining channel ID: " << target_channel_id 
-                       << " | Name: " << target_channel_name << "...\n";
-             bot.send_message(msg.channel_id, "[Voice] Joining voice channel: " + target_channel_name);
-
-             std::cout << "[bronx join] Sending POST join_call REST request...\n";
-             auto join_res = bot.rest().join_voice_call(target_channel_id);
-             std::cout << "[bronx join] REST join_call response status: " << join_res.status_code << "\n";
-             std::cout << "[bronx join] REST join_call response body: " << join_res.body.dump() << "\n";
-             if (!join_res.success()) {
-               std::cout << "[bronx join] ERROR: failed to join voice call. Body: " << join_res.body << "\n";
-               bot.send_message(msg.channel_id, "[Voice] Failed to join call: " + join_res.error_message());
+             bot.send_message(msg.channel_id,
+                              "[Voice] Joining " + channel_name + "...");
+             if (!connect_to_voice(bot, channel_id, error)) {
+               bot.send_message(msg.channel_id, "[Voice] " + error);
                return;
              }
-
-             std::string ws_url = join_res.body.value("url", "");
-             std::string token = join_res.body.value("token", "");
-             if (ws_url.empty() || token.empty()) {
-               std::cout << "[bronx join] ERROR: missing url or token in join response.\n";
-               bot.send_message(msg.channel_id, "[Voice] Invalid voice token payload returned by server.");
-               return;
-             }
-
-             std::cout << "[bronx join] Successfully joined voice call on server. Initializing WebRTC client...\n";
-
-             voice_.disconnect();
-             if (!voice_.connect(ws_url, token)) {
-               std::cout << "[bronx join] ERROR: failed to establish WebRTC connection to " << ws_url << "\n";
-               bot.send_message(msg.channel_id, "[Voice] Failed to establish WebRTC connection to voice server.");
-               return;
-             }
-
-             if (pulse_.is_initialized()) {
-               pulse_.shutdown();
-             }
-
-             if (!pulse_.init("bronx-bot", "voice-stream")) {
-               std::cout << "[bronx join] ERROR: failed to init PulseAudio.\n";
-               bot.send_message(msg.channel_id, "[Voice] Joined on server, but failed to initialize PulseAudio playback.");
-               return;
-             }
-
-             current_channel_id_ = target_channel_id;
-
-             // Signal voice presence to the Stoat gateway — this is what
-             // makes the bot actually show up in the voice channel UI.
-             std::cout << "[bronx join] Sending ChannelVoice gateway signal...\n";
-             bot.ws().join_voice_channel(target_channel_id);
-
-             std::cout << "[bronx join] Playing local join chime...\n";
-             pulse_.play_chime(true);
-
-             bot.send_message(msg.channel_id, "[Voice] Successfully joined voice channel and initialized WebRTC audio!");
-           }).detach();
+             bot.send_message(msg.channel_id,
+                              "[Voice] Joined " + channel_name + ".");
+           });
          },
          "Voice"});
 
     // 2. Leave voice channel command
     bot.register_command(
         {"leave",
-         {"part", "disconnect"},
+         {"part", "disconnect", "stop"},
          "leave the current voice channel.",
          "leave",
          {},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
             const std::vector<std::string> &args) {
-           std::cout << "[bronx command] handling leave...\n";
-           if (current_channel_id_.empty()) {
+           if (active_channel_id().empty()) {
              bot.send_message(msg.channel_id, "" + bronx::emj_warning + " I am not currently connected to any voice channel.");
              return;
            }
 
-           std::thread([this, &bot, msg]() {
-             // Play a cool leave chime
-             pulse_.play_chime(false);
-
-             // Signal departure to the Stoat gateway
-             bot.ws().leave_voice_channel(current_channel_id_);
-
-             voice_.disconnect();
-             pulse_.shutdown();
-             current_channel_id_ = "";
-
-             bot.send_message(msg.channel_id, "👋 **Disconnected from voice channel.** WebRTC connection and PulseAudio stream closed.");
-           }).detach();
+           launch_task(bot, msg.channel_id, [this, &bot, msg] {
+             std::lock_guard<std::mutex> operation_lock(voice_operation_mutex_);
+             music_->stop();
+             std::string channel_id;
+             {
+               std::lock_guard<std::mutex> lock(voice_mutex_);
+               channel_id = current_channel_id_;
+             }
+             if (channel_id.empty()) {
+               bot.send_message(msg.channel_id,
+                                "I am not currently connected to a voice channel.");
+               return;
+             }
+             bot.ws().leave_voice_channel(channel_id);
+             {
+               std::lock_guard<std::mutex> lock(voice_mutex_);
+               voice_.disconnect();
+               current_channel_id_.clear();
+             }
+             {
+               std::lock_guard<std::mutex> lock(pulse_mutex_);
+               pulse_.shutdown();
+             }
+             bot.send_message(msg.channel_id,
+                              "👋 Disconnected from the voice channel.");
+           });
          },
          "Voice"});
 
@@ -252,7 +237,9 @@ public:
              return;
            }
 
-           std::thread([this, &bot, msg, freq, duration]() {
+           launch_task(bot, msg.channel_id,
+                       [this, &bot, msg, freq, duration] {
+             std::lock_guard<std::mutex> lock(pulse_mutex_);
              if (!pulse_.is_initialized()) {
                pulse_.init("bronx-bot", "tone-stream");
              }
@@ -264,7 +251,7 @@ public:
              } else {
                bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to play tone via PulseAudio.");
              }
-           }).detach();
+           });
          },
          "Voice"});
 
@@ -294,15 +281,18 @@ public:
              return;
            }
 
-           std::thread([this, &bot, msg, duration]() {
-             if (!pulse_.is_initialized()) {
-               pulse_.init("bronx-bot", "mic-stream");
-             }
-
+           launch_task(bot, msg.channel_id, [this, &bot, msg, duration] {
              bot.send_message(msg.channel_id, "🎤 **Recording microphone input for " + std::to_string(duration) + " seconds...** Speak now!");
 
              double average_rms = 0.0;
-             auto samples = pulse_.record_mic(duration, average_rms);
+             std::vector<int16_t> samples;
+             {
+               std::lock_guard<std::mutex> lock(pulse_mutex_);
+               if (!pulse_.is_initialized()) {
+                 pulse_.init("bronx-bot", "mic-stream");
+               }
+               samples = pulse_.record_mic(duration, average_rms);
+             }
 
              if (samples.empty()) {
                bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to record audio from PulseAudio recording source.");
@@ -330,131 +320,677 @@ public:
              }
 
              bot.send_message(msg.channel_id, ss.str());
-           }).detach();
+           });
          },
          "Voice"});
 
-    // 5. Play YouTube audio locally via PulseAudio
+    // 5. Resolve a YouTube URL or search and enqueue it for playback.
     bot.register_command(
-        {"playyt",
-         {"yt", "youtube"},
-         "stream and play audio from a YouTube video locally.",
-         "playyt <youtube_url>",
-         {"<youtube_url>"},
+        {"play",
+         {"p", "playyt", "yt", "youtube"},
+         "play or queue a YouTube video by URL or search query.",
+         "play <youtube_url_or_search>",
+         {"<youtube_url_or_search>"},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
-            const std::vector<std::string> &args) {
-           std::cout << "[bronx command] handling playyt...\n";
+                const std::vector<std::string> &args) {
            if (args.empty()) {
-             bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Usage: `.playyt <youtube_url>`");
+             bot.send_message(msg.channel_id,
+                              "Usage: `.play <YouTube URL or search query>`");
              return;
            }
-
-           std::string url = args[0];
-           
-           // Simple validation of URL to prevent command injection
-           if (url.find('\'') != std::string::npos || url.find('"') != std::string::npos || 
-               url.find(';') != std::string::npos || url.find('`') != std::string::npos ||
-               url.find('|') != std::string::npos || url.find('&') != std::string::npos) {
-             bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Invalid character in URL.");
+           if (msg.server_id.empty()) {
+             bot.send_message(msg.channel_id,
+                              "[Music] This command can only be used in a server.");
              return;
            }
-
-           std::thread([this, &bot, msg, url]() {
-             if (!pulse_.is_initialized()) {
-               pulse_.init("bronx-bot", "voice-stream");
-             }
-
-             std::string stream_url = "";
-             try {
-               httplib::Client cli("http://127.0.0.1:7111");
-               cli.set_connection_timeout(std::chrono::seconds(5));
-               cli.set_read_timeout(std::chrono::seconds(10));
-                
-               httplib::Headers headers = {
-                 {"Accept", "application/json"},
-                 {"Content-Type", "application/json"}
-               };
-                
-               nlohmann::json payload;
-               payload["url"] = url;
-               payload["downloadMode"] = "audio";
-               payload["audioFormat"] = "mp3";
-                
-               auto res = cli.Post("/", headers, payload.dump(), "application/json");
-               if (res && res->status == 200) {
-                 auto resp_json = nlohmann::json::parse(res->body);
-                 if (resp_json.contains("url") && resp_json["url"].is_string()) {
-                   stream_url = resp_json["url"].get<std::string>();
-                 }
-               } else {
-                 std::cout << "[bronx playyt] Cobalt API request failed. Status: " 
-                           << (res ? std::to_string(res->status) : "connection error") << "\n";
-                 if (res) {
-                   std::cout << "[bronx playyt] Response body: " << res->body << "\n";
-                 }
+           const std::string query = join_args(args);
+           launch_task(bot, msg.channel_id, [this, &bot, msg, query] {
+             const std::string caller_channel =
+                 user_voice_channel(msg.author.id);
+             std::string current_channel = active_channel_id();
+             std::string error;
+             if (current_channel.empty()) {
+               if (caller_channel.empty()) {
+                 bot.send_message(
+                     msg.channel_id,
+                     "[Music] Join a voice channel first, or use `.join <channel>`.");
+                 return;
                }
-             } catch (const std::exception& e) {
-               std::cout << "[bronx playyt] Exception during Cobalt API call: " << e.what() << "\n";
+               if (!connect_to_voice(bot, caller_channel, error)) {
+                 bot.send_message(msg.channel_id, "[Voice] " + error);
+                 return;
+               }
+               current_channel = caller_channel;
+             } else if (caller_channel.empty() ||
+                        caller_channel != current_channel) {
+               bot.send_message(
+                   msg.channel_id,
+                   "[Music] Join my current voice channel to control playback.");
+               return;
              }
-
-             if (stream_url.empty()) {
-               std::cout << "[bronx playyt] ERROR: Failed to extract stream URL.\n";
-               bot.send_message(msg.channel_id, "[Music] Failed to extract direct audio stream from Cobalt.");
+             if (!voice_is_connected() &&
+                 !connect_to_voice(bot, current_channel, error)) {
+               bot.send_message(msg.channel_id, "[Voice] " + error);
                return;
              }
 
-             std::cout << "[bronx playyt] Got direct stream URL: " << stream_url << "\n";
-
-             // Build shell pipeline to read stream URL via ffmpeg and convert to mono, 48kHz, 16-bit PCM
-             std::string cmd = "ffmpeg -i \"" + stream_url + "\" -f s16le -ac 1 -ar 48000 pipe:1";
-             std::cout << "[bronx playyt] Pipeline command: " << cmd << "\n";
-              
-             FILE* pipe = popen(cmd.c_str(), "r");
-             if (!pipe) {
-               std::cout << "[bronx playyt] ERROR: popen failed to start the pipeline.\n";
-               bot.send_message(msg.channel_id, "[Music] Failed to launch audio streaming pipeline.");
+             bot.send_message(msg.channel_id, "[Music] Searching YouTube...");
+             auto track = resolve_youtube(query, error);
+             if (!track) {
+               bot.send_message(msg.channel_id, "[Music] " + error);
+               return;
+             }
+             if (active_channel_id() != current_channel) {
+               bot.send_message(
+                   msg.channel_id,
+                   "[Music] The voice connection changed before the track was queued.");
                return;
              }
 
-             char buffer[4096];
-             size_t bytes_read = 0;
-             size_t total_bytes = 0;
-             size_t last_log_bytes = 0;
-             bool success = false;
-
-             while ((bytes_read = fread(buffer, 1, sizeof(buffer), pipe)) > 0) {
-               success = true;
-               total_bytes += bytes_read;
-               pulse_.write_audio(buffer, bytes_read);
-                
-               // Log every 512KB of audio processed to avoid flooding but keep updated
-               if (total_bytes - last_log_bytes >= 512 * 1024) {
-                 std::cout << "[bronx playyt] Streamed " << (total_bytes / 1024) << " KB to PulseAudio...\n";
-                 last_log_bytes = total_bytes;
-               }
+             size_t position = 0;
+             if (!music_->enqueue(std::move(*track), msg.channel_id, position)) {
+               bot.send_message(msg.channel_id,
+                                "[Music] The queue is full or shutting down.");
+               return;
              }
+             bot.send_message(msg.channel_id,
+                              "[Music] Added to the queue at position " +
+                                  std::to_string(position) + ".");
+           });
+         },
+         "Voice"});
 
-             int exit_status = pclose(pipe);
-             std::cout << "[bronx playyt] Pipeline finished. Total bytes read: " << total_bytes 
-                       << " | Exit code: " << exit_status << "\n";
-              
-             if (success) {
-               pulse_.drain();
-               std::cout << "[bronx playyt] Finished playing audio successfully.\n";
-               bot.send_message(msg.channel_id, "[Music] Finished playing YouTube audio.");
-             } else {
-               std::cout << "[bronx playyt] Failed to read any audio bytes from pipeline.\n";
-               bot.send_message(msg.channel_id, "[Music] Failed to play audio. Make sure the video is valid and reachable.");
+    bot.register_command(
+        {"queue",
+         {"list", "q"},
+         "show the current track and queued tracks.",
+         "queue",
+         {},
+         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                const std::vector<std::string> &) {
+           std::string error;
+           if (!can_control_player(msg, error)) {
+             bot.send_message(msg.channel_id, "[Music] " + error);
+             return;
+           }
+           bot.send_message(msg.channel_id, music_->queue_text());
+         },
+         "Voice"});
+
+    bot.register_command(
+        {"skip",
+         {},
+         "skip the current track.",
+         "skip",
+         {},
+         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                const std::vector<std::string> &) {
+           std::string error;
+           if (!can_control_player(msg, error)) {
+             bot.send_message(msg.channel_id, "[Music] " + error);
+             return;
+           }
+           bot.send_message(msg.channel_id, music_->skip());
+         },
+         "Voice"});
+
+    bot.register_command(
+        {"pause",
+         {},
+         "pause music playback.",
+         "pause",
+         {},
+         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                const std::vector<std::string> &) {
+           std::string error;
+           if (!can_control_player(msg, error)) {
+             bot.send_message(msg.channel_id, "[Music] " + error);
+             return;
+           }
+           bot.send_message(msg.channel_id, music_->pause());
+         },
+         "Voice"});
+
+    bot.register_command(
+        {"resume",
+         {},
+         "resume music playback.",
+         "resume",
+         {},
+         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                const std::vector<std::string> &) {
+           std::string error;
+           if (!can_control_player(msg, error)) {
+             bot.send_message(msg.channel_id, "[Music] " + error);
+             return;
+           }
+           bot.send_message(msg.channel_id, music_->resume());
+         },
+         "Voice"});
+
+    bot.register_command(
+        {"clear",
+         {},
+         "clear queued tracks without stopping the current track.",
+         "clear",
+         {},
+         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                const std::vector<std::string> &) {
+           std::string error;
+           if (!can_control_player(msg, error)) {
+             bot.send_message(msg.channel_id, "[Music] " + error);
+             return;
+           }
+           bot.send_message(msg.channel_id, music_->clear_queue());
+         },
+         "Voice"});
+
+    bot.register_command(
+        {"volume",
+         {"vol"},
+         "set playback volume from 0 to 200 percent.",
+         "volume <0-200>",
+         {"<0-200>"},
+         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                const std::vector<std::string> &args) {
+           if (args.empty()) {
+             bot.send_message(msg.channel_id, "Usage: `.volume <0-200>`");
+             return;
+           }
+           std::string error;
+           if (!can_control_player(msg, error)) {
+             bot.send_message(msg.channel_id, "[Music] " + error);
+             return;
+           }
+           try {
+             size_t parsed = 0;
+             const int volume = std::stoi(args[0], &parsed);
+             if (parsed != args[0].size() || volume < 0 || volume > 200) {
+               bot.send_message(msg.channel_id,
+                                "Volume must be a whole number from 0 to 200.");
+               return;
              }
-           }).detach();
+             bot.send_message(
+                 msg.channel_id,
+                 music_->set_volume(static_cast<double>(volume) / 100.0));
+           } catch (const std::invalid_argument &) {
+             bot.send_message(msg.channel_id,
+                              "Volume must be a whole number from 0 to 200.");
+           } catch (const std::out_of_range &) {
+             bot.send_message(msg.channel_id,
+                              "Volume must be a whole number from 0 to 200.");
+           }
          },
          "Voice"});
   }
 
 private:
+  struct AsyncTask {
+    std::thread thread;
+    std::shared_ptr<std::atomic<bool>> finished;
+  };
+
+  template <typename Function>
+  void launch_task(stoatpp::cluster &bot, const std::string &message_channel,
+                   Function function) {
+    std::lock_guard<std::mutex> lock(async_mutex_);
+    for (auto it = async_tasks_.begin(); it != async_tasks_.end();) {
+      if (it->finished->load()) {
+        if (it->thread.joinable())
+          it->thread.join();
+        it = async_tasks_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    if (async_tasks_.size() >= 4) {
+      bot.send_message(message_channel,
+                       "[Voice] Too many requests are already in progress.");
+      return;
+    }
+
+    auto finished = std::make_shared<std::atomic<bool>>(false);
+    async_tasks_.push_back(
+        {std::thread([function = std::move(function), &bot, message_channel,
+                      finished]() mutable {
+           try {
+             function();
+           } catch (const std::exception &error) {
+             std::cerr << "[bronx voice] background task failed: "
+                       << error.what() << "\n";
+             bot.send_message(message_channel,
+                              "[Voice] Request failed: " +
+                                  std::string(error.what()));
+           }
+           finished->store(true);
+         }),
+         std::move(finished)});
+  }
+
+  static std::string join_args(const std::vector<std::string> &args) {
+    std::ostringstream result;
+    for (size_t i = 0; i < args.size(); ++i) {
+      if (i != 0)
+        result << ' ';
+      result << args[i];
+    }
+    return result.str();
+  }
+
+  std::string user_voice_channel(const std::string &user_id) const {
+    std::lock_guard<std::mutex> lock(voice_state_mutex_);
+    auto it = user_voice_channels_.find(user_id);
+    return it == user_voice_channels_.end() ? "" : it->second;
+  }
+
+  std::string active_channel_id() const {
+    std::lock_guard<std::mutex> lock(voice_mutex_);
+    return current_channel_id_;
+  }
+
+  bool voice_is_connected() const {
+    std::lock_guard<std::mutex> lock(voice_mutex_);
+    return voice_.is_connected();
+  }
+
+  bool can_control_player(const stoatpp::events::Message &msg,
+                          std::string &error) const {
+    const std::string channel_id = active_channel_id();
+    if (channel_id.empty()) {
+      error = "I am not connected to a voice channel.";
+      return false;
+    }
+    if (msg.server_id.empty() ||
+        user_voice_channel(msg.author.id) != channel_id) {
+      error = "Join my voice channel to control playback.";
+      return false;
+    }
+    return true;
+  }
+
+  static std::string lowercase(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) {
+                     return static_cast<char>(std::tolower(ch));
+                   });
+    return value;
+  }
+
+  bool resolve_voice_channel(stoatpp::cluster &bot,
+                             const stoatpp::events::Message &msg,
+                             const std::vector<std::string> &args,
+                             std::string &channel_id,
+                             std::string &channel_name,
+                             std::string &error) const {
+    std::string input = join_args(args);
+    if (input.empty()) {
+      input = user_voice_channel(msg.author.id);
+      if (input.empty()) {
+        error = "I can't detect your voice channel. Join one first or specify "
+                "a voice channel.";
+        return false;
+      }
+    }
+    if (input.size() > 3 && input.rfind("<#", 0) == 0 &&
+        input.back() == '>') {
+      input = input.substr(2, input.size() - 3);
+    }
+
+    auto is_voice_channel = [](const stoatpp::models::Channel &channel) {
+      return channel.channel_type == "VoiceChannel" ||
+             (channel.channel_type == "TextChannel" &&
+              channel.raw.contains("voice") && !channel.raw["voice"].is_null());
+    };
+
+    auto accept_channel = [&](const stoatpp::models::Channel &channel) {
+      if (!is_voice_channel(channel) || !channel.server ||
+          *channel.server != msg.server_id) {
+        return false;
+      }
+      channel_id = channel.id;
+      channel_name = channel.name.value_or("voice channel");
+      return !channel_id.empty();
+    };
+
+    if (input.size() == 26) {
+      auto cached_channel = bot.get_channel(input);
+      if (cached_channel && accept_channel(*cached_channel))
+        return true;
+
+      auto response = bot.rest().get_channel(input);
+      if (response.success() &&
+          accept_channel(stoatpp::models::Channel::from_json(response.body)))
+        return true;
+      error = "I couldn't find an accessible voice channel with that ID in "
+              "this server.";
+      return false;
+    }
+
+    const std::string search = lowercase(input);
+    for (const auto &channel : bot.get_channels()) {
+      if (!channel.server || *channel.server != msg.server_id ||
+          !is_voice_channel(channel) || !channel.name) {
+        continue;
+      }
+      if (lowercase(*channel.name).find(search) != std::string::npos) {
+        channel_id = channel.id;
+        channel_name = *channel.name;
+        return true;
+      }
+    }
+
+    error = "Could not find a matching voice channel.";
+    return false;
+  }
+
+  bool connect_to_voice(stoatpp::cluster &bot, const std::string &channel_id,
+                        std::string &error) {
+    std::lock_guard<std::mutex> operation_lock(voice_operation_mutex_);
+    {
+      std::lock_guard<std::mutex> lock(voice_mutex_);
+      if (current_channel_id_ == channel_id && voice_.is_connected())
+        return true;
+    }
+
+    music_->stop();
+    std::string old_channel;
+    {
+      std::lock_guard<std::mutex> lock(voice_mutex_);
+      old_channel = current_channel_id_;
+      voice_.disconnect();
+      current_channel_id_.clear();
+    }
+    if (!old_channel.empty())
+      bot.ws().leave_voice_channel(old_channel);
+
+    auto node_info = bot.rest().get_node_info();
+    if (!node_info.success() ||
+        !node_info.body.contains("features") ||
+        !node_info.body["features"].is_object() ||
+        !node_info.body["features"].contains("livekit") ||
+        !node_info.body["features"]["livekit"].is_object() ||
+        !node_info.body["features"]["livekit"].contains("nodes") ||
+        !node_info.body["features"]["livekit"]["nodes"].is_array()) {
+      error = "The Stoat instance did not provide voice server information.";
+      return false;
+    }
+
+    std::string voice_node;
+    for (const auto &node : node_info.body["features"]["livekit"]["nodes"]) {
+      if (node.is_object() && node.contains("name") &&
+          node["name"].is_string()) {
+        voice_node = node["name"].get<std::string>();
+        if (!voice_node.empty())
+          break;
+      }
+    }
+    if (voice_node.empty()) {
+      error = "The Stoat instance did not advertise an available voice server.";
+      return false;
+    }
+
+    auto response = bot.rest().join_voice_call(channel_id, voice_node);
+    if (!response.success()) {
+      error = "Failed to join the voice call: " + response.error_message();
+      return false;
+    }
+
+    const std::string url = response.body.value("url", "");
+    const std::string token = response.body.value("token", "");
+    if (url.empty() || token.empty()) {
+      error = "The voice server returned an invalid connection response.";
+      return false;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(voice_mutex_);
+      if (!voice_.connect(url, token)) {
+        voice_.disconnect();
+        error = "Could not establish the voice connection.";
+        return false;
+      }
+    }
+
+    bool connected = false;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(15);
+    while (std::chrono::steady_clock::now() < deadline) {
+      {
+        std::lock_guard<std::mutex> lock(voice_mutex_);
+        connected = voice_.is_connected();
+      }
+      if (connected)
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (!connected) {
+      std::lock_guard<std::mutex> lock(voice_mutex_);
+      voice_.disconnect();
+      error = "The voice server did not finish connecting.";
+      return false;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(voice_mutex_);
+      current_channel_id_ = channel_id;
+    }
+    bot.ws().join_voice_channel(channel_id);
+
+    {
+      std::lock_guard<std::mutex> lock(pulse_mutex_);
+      if (pulse_.is_initialized())
+        pulse_.shutdown();
+      pulse_.init("bronx-bot", "voice-stream");
+      pulse_.play_chime(true);
+    }
+    return true;
+  }
+
+  static bool supported_youtube_url(const std::string &url) {
+    const size_t scheme_end = url.find("://");
+    if (scheme_end == std::string::npos)
+      return false;
+    const std::string scheme = lowercase(url.substr(0, scheme_end));
+    if (scheme != "http" && scheme != "https")
+      return false;
+    const size_t host_start = scheme_end + 3;
+    const size_t host_end = url.find_first_of("/?#", host_start);
+    std::string host = lowercase(
+        url.substr(host_start, host_end == std::string::npos
+                                   ? std::string::npos
+                                   : host_end - host_start));
+    if (host.find('@') != std::string::npos)
+      return false;
+    const size_t port = host.find(':');
+    if (port != std::string::npos)
+      host.resize(port);
+    return host == "youtu.be" || host == "youtube.com" ||
+           (host.size() > 12 &&
+            host.compare(host.size() - 12, 12, ".youtube.com") == 0);
+  }
+
+  static bool capture_ytdlp_json(const std::string &target,
+                                std::string &output,
+                                std::string &error) {
+    int descriptors[2] = {-1, -1};
+    if (pipe(descriptors) != 0) {
+      error = "Could not create the YouTube search process.";
+      return false;
+    }
+
+    posix_spawn_file_actions_t actions;
+    int spawn_error = posix_spawn_file_actions_init(&actions);
+    const bool actions_initialized = spawn_error == 0;
+    if (spawn_error == 0)
+      spawn_error =
+          posix_spawn_file_actions_adddup2(&actions, descriptors[1],
+                                           STDOUT_FILENO);
+    if (spawn_error == 0)
+      spawn_error = posix_spawn_file_actions_addopen(
+          &actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+    if (spawn_error == 0)
+      spawn_error = posix_spawn_file_actions_addclose(&actions, descriptors[0]);
+    if (spawn_error == 0)
+      spawn_error = posix_spawn_file_actions_addclose(&actions, descriptors[1]);
+    pid_t child = -1;
+    if (spawn_error == 0) {
+      std::vector<char *> argv = {
+          const_cast<char *>("yt-dlp"),
+          const_cast<char *>("--ignore-config"),
+          const_cast<char *>("--socket-timeout"), const_cast<char *>("15"),
+          const_cast<char *>("--retries"), const_cast<char *>("1"),
+          const_cast<char *>("--quiet"),
+          const_cast<char *>("--no-warnings"),
+          const_cast<char *>("--skip-download"),
+          const_cast<char *>("--dump-single-json"),
+          const_cast<char *>("--no-playlist"), const_cast<char *>("--"),
+          const_cast<char *>(target.c_str()), nullptr};
+      spawn_error = posix_spawnp(&child, "yt-dlp", &actions, nullptr,
+                                 argv.data(), environ);
+    }
+    if (actions_initialized) {
+      posix_spawn_file_actions_destroy(&actions);
+    }
+    if (spawn_error != 0) {
+      close(descriptors[0]);
+      close(descriptors[1]);
+      error = "Could not start yt-dlp: " + std::string(std::strerror(spawn_error));
+      return false;
+    }
+
+    close(descriptors[1]);
+    constexpr size_t max_output = 2 * 1024 * 1024;
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(45);
+    bool timed_out = false;
+    std::array<char, 8192> buffer{};
+    while (true) {
+      pollfd descriptor{descriptors[0], POLLIN | POLLHUP, 0};
+      const int result = poll(&descriptor, 1, 250);
+      if (result < 0 && errno == EINTR)
+        continue;
+      if (result < 0) {
+        error = "Could not read the YouTube search result.";
+        break;
+      }
+      if (result > 0) {
+        const ssize_t count = read(descriptors[0], buffer.data(), buffer.size());
+        if (count == 0)
+          break;
+        if (count < 0) {
+          if (errno == EINTR || errno == EAGAIN)
+            continue;
+          error = "Could not read the YouTube search result.";
+          break;
+        }
+        if (output.size() + static_cast<size_t>(count) > max_output) {
+          error = "The YouTube search result was unexpectedly large.";
+          break;
+        }
+        output.append(buffer.data(), static_cast<size_t>(count));
+      }
+      if (std::chrono::steady_clock::now() >= deadline) {
+        timed_out = true;
+        error = "YouTube search timed out.";
+        break;
+      }
+    }
+    close(descriptors[0]);
+    if (timed_out || !error.empty())
+      kill(child, SIGTERM);
+
+    int status = 0;
+    for (int attempt = 0; attempt < 20; ++attempt) {
+      const pid_t waited = waitpid(child, &status, WNOHANG);
+      if (waited == child)
+        break;
+      if (waited < 0 && errno != EINTR)
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (waitpid(child, &status, WNOHANG) == 0) {
+      kill(child, SIGKILL);
+      while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
+      }
+    }
+    if (!error.empty())
+      return false;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+      error = "No playable YouTube result was found. Check the URL or search "
+              "terms and try again.";
+      return false;
+    }
+    return true;
+  }
+
+  static std::optional<VoiceMusicPlayer::Track>
+  resolve_youtube(const std::string &query, std::string &error) {
+    std::string target = query;
+    if (query.rfind("http://", 0) == 0 ||
+        query.rfind("https://", 0) == 0) {
+      if (!supported_youtube_url(query)) {
+        error = "Only YouTube video URLs are supported right now.";
+        return std::nullopt;
+      }
+    } else {
+      if (query.find("://") != std::string::npos) {
+        error = "Only YouTube video URLs or search terms are supported.";
+        return std::nullopt;
+      }
+      target = "ytsearch1:" + query;
+    }
+
+    std::string json_text;
+    if (!capture_ytdlp_json(target, json_text, error))
+      return std::nullopt;
+
+    try {
+      auto json = nlohmann::json::parse(json_text);
+      if (json.contains("entries") && json["entries"].is_array()) {
+        if (json["entries"].empty() || json["entries"][0].is_null()) {
+          error = "No playable YouTube result was found.";
+          return std::nullopt;
+        }
+        json = json["entries"][0];
+      }
+      if (!json.is_object() || !json.contains("title") ||
+          !json["title"].is_string()) {
+        error = "YouTube returned incomplete track information.";
+        return std::nullopt;
+      }
+
+      VoiceMusicPlayer::Track track;
+      track.title = json["title"].get<std::string>();
+      if (json.contains("webpage_url") && json["webpage_url"].is_string())
+        track.url = json["webpage_url"].get<std::string>();
+      else if (json.contains("original_url") &&
+               json["original_url"].is_string())
+        track.url = json["original_url"].get<std::string>();
+      if (track.title.empty() || !supported_youtube_url(track.url)) {
+        error = "YouTube returned an invalid video URL.";
+        return std::nullopt;
+      }
+      if (json.contains("duration") && json["duration"].is_number())
+        track.duration_seconds = json["duration"].get<double>();
+      return track;
+    } catch (const nlohmann::json::exception &exception) {
+      error = "Could not parse YouTube's response: " +
+              std::string(exception.what());
+      return std::nullopt;
+    }
+  }
+
   stoatpp::pulse_voice_client pulse_;
   stoatpp::voice_connection voice_;
+  std::unique_ptr<VoiceMusicPlayer> music_;
+  mutable std::mutex voice_mutex_;
+  std::mutex voice_operation_mutex_;
+  std::mutex pulse_mutex_;
+  mutable std::mutex voice_state_mutex_;
+  std::unordered_map<std::string, std::string> user_voice_channels_;
   std::string current_channel_id_;
+  std::mutex async_mutex_;
+  std::vector<AsyncTask> async_tasks_;
 };
 
 } // namespace bronx::cogs

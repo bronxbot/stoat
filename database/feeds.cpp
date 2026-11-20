@@ -596,12 +596,9 @@ namespace bronx {
         null_or(c.filter.ignore_channels) +
         ","
         "actions='" +
-        escape_string(c.actions) + "' "
-        "WHERE id=" + std::to_string(c.id) + " AND server_id='" + escape_string(c.server_id) + "'"; +
-        " "
-        "WHERE id=" +
-        std::to_string(c.id) + " AND server_id='" + escape_string(c.server_id) +
-        "'";
+        escape_string(c.actions) +
+        "' WHERE id=" + std::to_string(c.id) +
+        " AND server_id='" + escape_string(c.server_id) + "'";
     if (mysql_query(mysql_, sql.c_str()))
       return false;
     std::lock_guard<std::shared_mutex> cache_lock(arsp_cache_mutex_);
