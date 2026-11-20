@@ -9,43 +9,65 @@
 namespace bronx::cogs {
 
 class RemindersModule : public stoatpp::bot_module {
+private:
+    static void send_reminder_list(stoatpp::cluster& bot,
+                                   const stoatpp::events::Message& msg) {
+        if (!g_db) {
+            bot.send_message(msg.channel_id,
+                             "Reminder storage is currently unavailable.");
+            return;
+        }
+
+        auto rems = g_db->get_user_reminders(msg.author.id);
+        if (rems.empty()) {
+            bot.send_message(msg.channel_id,
+                             "You don't have any active reminders. Set one with `" +
+                             (msg.prefix.empty() ? bot.config().command_prefix : msg.prefix) +
+                             "remind <time> <message>`.");
+            return;
+        }
+
+        stoatpp::models::MessagePayload payload;
+        stoatpp::models::Embed embed;
+        embed.set_colour(0x5865F2);
+        embed.set_title("Your reminders");
+
+        std::string desc;
+        for (size_t i = 0; i < rems.size(); ++i) {
+            desc += "**" + std::to_string(i + 1) + ".** <t:" +
+                    std::to_string(rems[i].timestamp_due) + ":R> — " +
+                    rems[i].message + "\n";
+            if (desc.size() > 3000) {
+                desc += "... and more";
+                break;
+            }
+        }
+        embed.set_description(desc);
+        payload.add_embed(embed);
+        bot.send_message(msg.channel_id, payload);
+    }
+
 public:
     void register_handlers(stoatpp::cluster& bot) override {
         bot.register_command({
             "remind",
             {"remindme", "reminder"},
-            "set a reminder up to 2 years in the future.",
-            "",
-            {"<time>", "<message>"},
+            "set a reminder or list your active reminders.",
+            "remind <time> <message> | remind list",
+            {},
             [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
                 if (args.size() > 0 && args[0] == "list") {
-                    auto rems = g_db->get_user_reminders(msg.author.id);
-                    if (rems.empty()) {
-                        bot.send_message(msg.channel_id, "you don't have any active reminders.");
-                        return;
-                    }
-
-                    stoatpp::models::MessagePayload payload;
-                    stoatpp::models::Embed embed;
-                    embed.set_colour(0x5865F2);
-                    embed.set_title("your reminders");
-                    
-                    std::string desc = "";
-                    for (size_t i = 0; i < rems.size(); ++i) {
-                        desc += "**" + std::to_string(i + 1) + ".** <t:" + std::to_string(rems[i].timestamp_due) + ":R> — " + rems[i].message + "\n";
-                        if (desc.size() > 3000) {
-                            desc += "... and more";
-                            break;
-                        }
-                    }
-                    embed.set_description(desc);
-                    payload.add_embed(embed);
-                    bot.send_message(msg.channel_id, payload);
+                    send_reminder_list(bot, msg);
                     return;
                 }
 
+                const std::string prefix =
+                    msg.prefix.empty() ? bot.config().command_prefix : msg.prefix;
                 if (args.size() < 2) {
-                    bot.send_message(msg.channel_id, "usage: `!remind <time> <message>` (e.g. `!remind 2h check oven`)\nor `!remind list` to view active reminders.");
+                    bot.send_message(msg.channel_id, "Usage: `" + prefix +
+                        "remind <time> <message>` (for example, `" + prefix +
+                        "remind 2h check oven`), or `" + prefix +
+                        "remind list` to view active reminders.");
                     return;
                 }
 
@@ -80,35 +102,15 @@ public:
             "Utility"
         });
 
+        // Compatibility shortcut; the canonical route is `.remind list`.
         bot.register_command({
             "reminders",
             {"remindlist", "reminderlist"},
-            "list all your currently active reminders.",
+            "shortcut for `remind list`.",
             "",
             {},
-            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
-                auto rems = g_db->get_user_reminders(msg.author.id);
-                if (rems.empty()) {
-                    bot.send_message(msg.channel_id, "you don't have any active reminders.");
-                    return;
-                }
-
-                stoatpp::models::MessagePayload payload;
-                stoatpp::models::Embed embed;
-                embed.set_colour(0x5865F2);
-                embed.set_title("your reminders");
-                
-                std::string desc = "";
-                for (size_t i = 0; i < rems.size(); ++i) {
-                    desc += "**" + std::to_string(i + 1) + ".** <t:" + std::to_string(rems[i].timestamp_due) + ":R> — " + rems[i].message + "\n";
-                    if (desc.size() > 3000) {
-                        desc += "... and more";
-                        break;
-                    }
-                }
-                embed.set_description(desc);
-                payload.add_embed(embed);
-                bot.send_message(msg.channel_id, payload);
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>&) {
+                send_reminder_list(bot, msg);
             },
             "Utility"
         });

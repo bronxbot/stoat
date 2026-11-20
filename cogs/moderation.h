@@ -567,9 +567,9 @@ public:
 
         bot.register_command({
             "timeout",
-            {},
+            {"mute", "tempmute"},
             "timeout a member (mute/restrict).",
-            "",
+            "timeout <@user|id> <duration> [reason]",
             {"<@user|id>", "<duration>", "[reason]"},
             [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
                 std::cout << "[bronx command] handling timeout...\n";
@@ -675,6 +675,81 @@ public:
                 });
             },
             "Moderation",
+            stoatpp::permissions::TimeoutMembers
+        });
+
+        bot.register_command({
+            "untimeout",
+            {"unmute"},
+            "removes timeout/mute from a member.",
+            "unmute <@user|id> [reason]",
+            {"<@user|id>", "[reason]"},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "Usage: `" + (msg.prefix.empty() ? "." : msg.prefix) + "unmute <@user|id> [reason]`");
+                    return;
+                }
+
+                auto server = bot.get_server(msg.server_id);
+                auto mem_opt = bot.get_member(msg.server_id, msg.author.id);
+                if (server && mem_opt) {
+                    if (!bot.has_permission(*server, *mem_opt, stoatpp::permissions::TimeoutMembers)) {
+                        bot.send_message(msg.channel_id, "permission error: you do not have permission to unmute members.");
+                        return;
+                    }
+                }
+
+                std::string query = args[0];
+                std::string reason = "no reason provided";
+                if (args.size() > 1) {
+                    reason = "";
+                    for (size_t i = 1; i < args.size(); ++i) {
+                        reason += args[i] + (i + 1 < args.size() ? " " : "");
+                    }
+                }
+
+                helpers::resolve_user(bot, msg.server_id, query, [&bot, msg, reason](stoatpp::models::User target_user, stoatpp::models::Member target_member, bool success) {
+                    if (!success) {
+                        bot.send_message(msg.channel_id, "could not resolve target user.");
+                        return;
+                    }
+
+                    bot.fetch_member(msg.server_id, msg.author.id, [&bot, msg, target_member, target_user, reason](stoatpp::models::Member exec_member, bool exec_ok) {
+                        if (!exec_ok) {
+                            bot.send_message(msg.channel_id, "failed to verify executor member settings.");
+                            return;
+                        }
+
+                        bot.fetch_member(msg.server_id, bot.current_user().id, [&bot, msg, target_member, target_user, exec_member, reason](stoatpp::models::Member bot_member, bool bot_ok) {
+                            if (!bot_ok) {
+                                bot.send_message(msg.channel_id, "failed to verify bot member settings.");
+                                return;
+                            }
+
+                            if (!helpers::check_hierarchy(bot, msg.server_id, exec_member, target_member)) {
+                                bot.send_message(msg.channel_id, "hierarchy error: you cannot moderate this user.");
+                                return;
+                            }
+
+                            if (!helpers::check_hierarchy(bot, msg.server_id, bot_member, target_member)) {
+                                bot.send_message(msg.channel_id, "hierarchy error: i do not have high enough position to moderate this user.");
+                                return;
+                            }
+
+                            bot.remove_timeout(msg.server_id, target_user.id, [&bot, msg, target_user, reason](bool action_success) {
+                                if (action_success) {
+                                    log_moderation_action(bot, msg.server_id, "Untimeout", msg.author.id, target_user.id, reason, "Removed timeout", msg.channel_id);
+                                    bot.send_message(msg.channel_id, "🔊 Successfully unmuted **" + target_user.username + "**.");
+                                } else {
+                                    bot.send_message(msg.channel_id, "failed to remove timeout or user is not timed out.");
+                                }
+                            });
+                        });
+                    });
+                });
+            },
+            "Moderation",
+            0,
             stoatpp::permissions::TimeoutMembers
         });
 
@@ -1111,7 +1186,7 @@ public:
 
         bot.register_command({
             "purge",
-            {},
+            {"clear", "clean"},
             "bulk delete messages in the channel.",
             "",
             {"[amount]", "[@user]"},
@@ -1658,7 +1733,7 @@ public:
 
         bot.register_command({
             "modlogs",
-            {"ml"},
+            {"ml", "warns", "warnings"},
             "view or manage moderation history for a user.",
             "modlogs <@user|id/remove> [actions/id]",
             {"<@user|id>", "[actions]"},
@@ -1744,27 +1819,42 @@ public:
 
         bot.register_command({
             "slowmode",
-            {},
+            {"sm"},
             "set channel slowmode (0 to disable).",
             "",
             {"<seconds>", "[channel]"},
             [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
                 if (args.empty()) {
-                    bot.send_message(msg.channel_id, "usage: `.slowmode <seconds> [channel]`");
+                    bot.send_message(msg.channel_id, "usage: `.slowmode <duration|off> [channel]` (e.g. `5s`, `2m`, `0`, `off`)");
                     return;
                 }
 
-
                 int seconds = 0;
-                try {
-                    seconds = std::stoi(args[0]);
-                    if (seconds < 0) {
-                        bot.send_message(msg.channel_id, "duration cannot be negative.");
+                std::string arg0 = args[0];
+                for (auto& c : arg0) c = std::tolower(c);
+                if (arg0 == "off" || arg0 == "none" || arg0 == "disable") {
+                    seconds = 0;
+                } else {
+                    int mult = 1;
+                    if (!arg0.empty() && arg0.back() == 's') {
+                        arg0.pop_back();
+                    } else if (!arg0.empty() && arg0.back() == 'm') {
+                        arg0.pop_back();
+                        mult = 60;
+                    } else if (!arg0.empty() && arg0.back() == 'h') {
+                        arg0.pop_back();
+                        mult = 3600;
+                    }
+                    try {
+                        seconds = std::stoi(arg0) * mult;
+                        if (seconds < 0) {
+                            bot.send_message(msg.channel_id, "duration cannot be negative.");
+                            return;
+                        }
+                    } catch (...) {
+                        bot.send_message(msg.channel_id, "invalid duration. specify seconds/minutes or off (e.g. `5s`, `2m`, `0`, `off`).");
                         return;
                     }
-                } catch (...) {
-                    bot.send_message(msg.channel_id, "invalid duration. please specify duration in seconds.");
-                    return;
                 }
 
                 std::string target_channel = msg.channel_id;

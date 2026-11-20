@@ -187,6 +187,123 @@ public:
             "Owner"
         });
 
+        // givetokens
+        bot.register_command({
+            "givetokens",
+            {"addtokens", "granttokens", "giveprestigetokens", "giveprestigetoken", "givetoken"},
+            "gives fishing prestige tokens to a user.",
+            "givetokens <user> <amount>",
+            {"<user>", "<amount>"},
+            [this](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (!check_owner(bot, msg) || !g_db) return;
+
+                if (args.size() < 2) {
+                    bot.send_message(msg.channel_id, "invalid syntax. use `givetokens <user> <amount>`.");
+                    return;
+                }
+
+                std::string target_uid = resolve_user_id(args[0]);
+                int amount = 0;
+                try { amount = std::stoi(args[1]); } catch (...) {}
+
+                if (amount <= 0) {
+                    bot.send_message(msg.channel_id, "please specify a valid positive amount.");
+                    return;
+                }
+
+                auto fish_user = g_db->get_fishing_user(target_uid);
+                if (!fish_user) {
+                    bot.send_message(msg.channel_id, "❌ User profile could not be loaded.");
+                    return;
+                }
+
+                fish_user->prestige_tokens += amount;
+                if (g_db->update_fishing_user(*fish_user)) {
+                    bot.send_message(msg.channel_id, "👑 **Owner Action:** Added **" + std::to_string(amount) + "** prestige tokens to <@" + target_uid + "> (Total: **" + std::to_string(fish_user->prestige_tokens) + "** 🪙).");
+                } else {
+                    bot.send_message(msg.channel_id, "❌ Failed to update prestige tokens in database.");
+                }
+            },
+            "Owner"
+        });
+
+        // taketokens
+        bot.register_command({
+            "taketokens",
+            {"removetokens", "takeprestigetokens"},
+            "removes fishing prestige tokens from a user.",
+            "taketokens <user> <amount>",
+            {"<user>", "<amount>"},
+            [this](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (!check_owner(bot, msg) || !g_db) return;
+
+                if (args.size() < 2) {
+                    bot.send_message(msg.channel_id, "invalid syntax. use `taketokens <user> <amount>`.");
+                    return;
+                }
+
+                std::string target_uid = resolve_user_id(args[0]);
+                int amount = 0;
+                try { amount = std::stoi(args[1]); } catch (...) {}
+
+                if (amount <= 0) {
+                    bot.send_message(msg.channel_id, "please specify a valid positive amount.");
+                    return;
+                }
+
+                auto fish_user = g_db->get_fishing_user(target_uid);
+                if (!fish_user) {
+                    bot.send_message(msg.channel_id, "❌ User profile could not be loaded.");
+                    return;
+                }
+
+                fish_user->prestige_tokens = std::max(0, fish_user->prestige_tokens - amount);
+                if (g_db->update_fishing_user(*fish_user)) {
+                    bot.send_message(msg.channel_id, "👑 **Owner Action:** Removed **" + std::to_string(amount) + "** prestige tokens from <@" + target_uid + "> (Total: **" + std::to_string(fish_user->prestige_tokens) + "** 🪙).");
+                } else {
+                    bot.send_message(msg.channel_id, "❌ Failed to update prestige tokens in database.");
+                }
+            },
+            "Owner"
+        });
+
+        // settokens
+        bot.register_command({
+            "settokens",
+            {"setprestigetokens"},
+            "sets exact fishing prestige tokens for a user.",
+            "settokens <user> <amount>",
+            {"<user>", "<amount>"},
+            [this](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (!check_owner(bot, msg) || !g_db) return;
+
+                if (args.size() < 2) {
+                    bot.send_message(msg.channel_id, "invalid syntax. use `settokens <user> <amount>`.");
+                    return;
+                }
+
+                std::string target_uid = resolve_user_id(args[0]);
+                int amount = 0;
+                try { amount = std::stoi(args[1]); } catch (...) {}
+
+                if (amount < 0) amount = 0;
+
+                auto fish_user = g_db->get_fishing_user(target_uid);
+                if (!fish_user) {
+                    bot.send_message(msg.channel_id, "❌ User profile could not be loaded.");
+                    return;
+                }
+
+                fish_user->prestige_tokens = amount;
+                if (g_db->update_fishing_user(*fish_user)) {
+                    bot.send_message(msg.channel_id, "👑 **Owner Action:** Set <@" + target_uid + ">'s prestige tokens to **" + std::to_string(fish_user->prestige_tokens) + "** 🪙.");
+                } else {
+                    bot.send_message(msg.channel_id, "❌ Failed to update prestige tokens in database.");
+                }
+            },
+            "Owner"
+        });
+
         // 5. createitem
         bot.register_command({
             "createitem",

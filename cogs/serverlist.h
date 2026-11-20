@@ -185,8 +185,12 @@ public:
                 if (subcommand == "setup" || subcommand == "set" || subcommand == "config" || subcommand == "submit" || subcommand == "bump") {
                     bot.fetch_member(msg.server_id, msg.author.id, [this, &bot, msg, subcommand, args, pfx](stoatpp::models::Member member, bool ok) {
                         if (!ok) {
-                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to verify permissions.");
-                            return;
+                            auto cached_member = bot.get_member(msg.server_id, msg.author.id);
+                            if (!cached_member) {
+                                bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Failed to verify permissions.");
+                                return;
+                            }
+                            member = *cached_member;
                         }
                         if (!is_user_trusted_or_owner(bot, msg.server_id, msg.author.id, member)) {
                             bot.send_message(msg.channel_id, "" + bronx::emj_warning + " You need **Manage Server** permission to modify listing configuration.");

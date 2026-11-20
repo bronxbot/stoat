@@ -1426,6 +1426,31 @@ public:
             "Tickets"
         });
 
+        bot.register_command({
+            "close",
+            {},
+            "close the current ticket channel.",
+            "",
+            {},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " This command can only be used in a server channel.");
+                    return;
+                }
+                if (!g_db) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Database is unavailable.");
+                    return;
+                }
+                auto ticket_opt = g_db->get_ticket(msg.channel_id);
+                if (!ticket_opt) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " This channel is not a registered ticket channel.");
+                    return;
+                }
+                execute_close_ticket(bot, msg.channel_id);
+            },
+            "Tickets"
+        });
+
         bot.on_message_react([&bot](const stoatpp::events::MessageReact& e) {
             if (e.user_id == bot.current_user().id) return;
             if (!g_db) return;

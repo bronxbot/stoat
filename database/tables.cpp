@@ -1266,6 +1266,26 @@ bool Database::init_tables() {
                 "  PRIMARY KEY (user_id, boss_type)"
                 ")");
 
+    mysql_query(mysql_,
+                "CREATE TABLE IF NOT EXISTS global_fish_bosses ("
+                "  boss_type VARCHAR(64) PRIMARY KEY,"
+                "  boss_name VARCHAR(128) NOT NULL DEFAULT '',"
+                "  season_theme VARCHAR(64) NOT NULL DEFAULT 'Summer',"
+                "  current_hp BIGINT NOT NULL DEFAULT 100000,"
+                "  max_hp BIGINT NOT NULL DEFAULT 100000,"
+                "  req_type VARCHAR(64) NOT NULL DEFAULT 'catches',"
+                "  req_progress BIGINT NOT NULL DEFAULT 0,"
+                "  req_target BIGINT NOT NULL DEFAULT 5000"
+                ")");
+
+    mysql_query(mysql_,
+                "CREATE TABLE IF NOT EXISTS user_boss_contributions ("
+                "  user_id VARCHAR(64) NOT NULL,"
+                "  boss_type VARCHAR(64) NOT NULL,"
+                "  contribution_amount BIGINT NOT NULL DEFAULT 0,"
+                "  PRIMARY KEY (user_id, boss_type)"
+                ")");
+
     mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS fish_inventory ("
                         "  id INT AUTO_INCREMENT PRIMARY KEY,"
                         "  user_id VARCHAR(64) NOT NULL,"

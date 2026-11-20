@@ -568,6 +568,7 @@ private:
 
                 // Send the rank card as attachment
                 stoatpp::models::MessagePayload payload;
+                payload.content = "📊 Rank card for " + username;
                 payload.add_attachment(file_id);
                 bot.send_message(channel_id, payload);
             }).detach();

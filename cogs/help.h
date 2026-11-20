@@ -7,6 +7,9 @@
 #include <unordered_map>
 #include <algorithm>
 #include <iostream>
+#include <sstream>
+#include <utility>
+#include <vector>
 
 namespace bronx::cogs {
 
@@ -36,9 +39,9 @@ public:
         bot.register_command({
             "help",
             {"h", "commands"},
-            "custom tabbed help menu detailing all commands.",
-            "",
-            {},
+            "search commands by name or keyword, or browse the command menu.",
+            "help [command|keyword|category]",
+            {"[command|keyword|category]"},
             [this](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
                 std::cout << "[bronx command] handling custom help...\n";
 
@@ -69,8 +72,13 @@ public:
                     };
 
                     if (!args.empty()) {
-                        std::string target_cmd_name = args[0];
-                        std::transform(target_cmd_name.begin(), target_cmd_name.end(), target_cmd_name.begin(), [](unsigned char c) { return std::tolower(c); });
+                        std::string target_cmd_name;
+                        for (const auto& arg : args) {
+                            if (!target_cmd_name.empty()) target_cmd_name += " ";
+                            target_cmd_name += arg;
+                        }
+                        target_cmd_name = to_lower(target_cmd_name);
+                        const std::string category_query = to_lower(args[0]);
 
                         auto all_cmds = bot.get_commands();
                         std::optional<stoatpp::Command> matched_cmd;
@@ -123,10 +131,12 @@ public:
                                 std::sort(pair.second.begin(), pair.second.end(), [](const auto& a, const auto& b) { return a.name < b.name; });
 
                             int cog_idx = -1;
-                            for (size_t i = 0; i < categories_cog.size(); ++i) {
-                                if (to_lower(categories_cog[i]) == target_cmd_name) {
-                                    cog_idx = static_cast<int>(i);
-                                    break;
+                            if (args.size() == 1) {
+                                for (size_t i = 0; i < categories_cog.size(); ++i) {
+                                    if (to_lower(categories_cog[i]) == category_query) {
+                                        cog_idx = static_cast<int>(i);
+                                        break;
+                                    }
                                 }
                             }
 
@@ -149,7 +159,116 @@ public:
                                 return;
                             }
 
-                            bot.send_message(msg.channel_id, "" + bronx::emj_warning + " command or cog `" + args[0] + "` not found. type `" + prefix + "help` for the full list.");
+                            std::vector<std::pair<int, stoatpp::Command>> matches;
+                            std::istringstream query_stream(target_cmd_name);
+                            std::vector<std::string> query_terms;
+                            std::string query_term;
+                            while (query_stream >> query_term)
+                                query_terms.push_back(query_term);
+
+                            for (const auto& [category, commands] : commands_by_cat_cog) {
+                                for (const auto& cmd : commands) {
+                                    std::string name = to_lower(cmd.name);
+                                    std::string description = to_lower(cmd.description);
+                                    std::string category_lower = to_lower(category);
+                                    std::vector<std::string> aliases;
+                                    std::string searchable = name + " " + description +
+                                                             " " + category_lower;
+                                    for (const auto& alias : cmd.aliases) {
+                                        aliases.push_back(to_lower(alias));
+                                        searchable += " " + aliases.back();
+                                    }
+
+                                    bool contains_all_terms = !query_terms.empty();
+                                    for (const auto& term : query_terms) {
+                                        if (searchable.find(term) == std::string::npos) {
+                                            contains_all_terms = false;
+                                            break;
+                                        }
+                                    }
+                                    if (!contains_all_terms) continue;
+
+                                    int score = 6;
+                                    if (name.rfind(target_cmd_name, 0) == 0) {
+                                        score = 0;
+                                    } else if (std::any_of(
+                                                   aliases.begin(), aliases.end(),
+                                                   [&target_cmd_name](const std::string& alias) {
+                                                     return alias.rfind(target_cmd_name, 0) == 0;
+                                                   })) {
+                                        score = 1;
+                                    } else if (name.find(target_cmd_name) != std::string::npos) {
+                                        score = 2;
+                                    } else if (std::any_of(
+                                                   aliases.begin(), aliases.end(),
+                                                   [&target_cmd_name](const std::string& alias) {
+                                                     return alias.find(target_cmd_name) != std::string::npos;
+                                                   })) {
+                                        score = 3;
+                                    } else if (category_lower.find(target_cmd_name) != std::string::npos) {
+                                        score = 4;
+                                    } else if (description.find(target_cmd_name) != std::string::npos) {
+                                        score = 5;
+                                    }
+                                    matches.emplace_back(score, cmd);
+                                }
+                            }
+
+                            std::sort(matches.begin(), matches.end(),
+                                      [](const auto& left, const auto& right) {
+                                        if (left.first != right.first)
+                                            return left.first < right.first;
+                                        return left.second.name < right.second.name;
+                                      });
+                            if (!matches.empty()) {
+                                std::string results;
+                                const size_t result_count = std::min<size_t>(matches.size(), 6);
+                                for (size_t i = 0; i < result_count; ++i) {
+                                    const auto& cmd = matches[i].second;
+                                    std::string syntax = prefix + cmd.name;
+                                    if (!cmd.args.empty()) {
+                                        for (const auto& arg : cmd.args)
+                                            syntax += " " + arg;
+                                    } else if (!cmd.usage.empty()) {
+                                        syntax = cmd.usage;
+                                    }
+                                    results += "**`" + syntax + "`**";
+                                    if (!cmd.aliases.empty()) {
+                                        results += " *(also ";
+                                        for (size_t alias = 0; alias < cmd.aliases.size(); ++alias) {
+                                            if (alias) results += ", ";
+                                            results += "`" + prefix + cmd.aliases[alias] + "`";
+                                        }
+                                        results += ")*";
+                                    }
+                                    if (!cmd.description.empty())
+                                        results += "\n" + cmd.description;
+                                    results += "\n\n";
+                                }
+                                if (matches.size() > result_count)
+                                    results += "Showing the first " +
+                                               std::to_string(result_count) +
+                                               " matches. Try a more specific search.\n\n";
+                                results += "Tip: use `" + prefix +
+                                           "help <command>` for details, or `" +
+                                           prefix + "help` to browse categories.";
+
+                                stoatpp::models::MessagePayload search_payload;
+                                search_payload.content = " ";
+                                stoatpp::models::Embed search_embed;
+                                search_embed.set_colour(0x5865F2)
+                                    .set_title("Commands matching: " + target_cmd_name)
+                                    .set_description(results);
+                                search_payload.add_embed(search_embed);
+                                bot.send_message(msg.channel_id, search_payload);
+                                return;
+                            }
+
+                            bot.send_message(
+                                msg.channel_id,
+                                "No commands found for `" + target_cmd_name +
+                                    "`. Try `" + prefix +
+                                    "help <keyword>` or `" + prefix + "help` to browse.");
                             return;
                         }
 
@@ -169,11 +288,11 @@ public:
                         
                         stoatpp::models::Embed embed;
                         embed.set_colour(0x5865F2)
-                             .set_title("help — " + to_lower(matched_cmd->name));
+                             .set_title("Help: " + matched_cmd->name);
 
                         std::string desc = "";
                         if (!matched_cmd->description.empty()) {
-                            desc += "**Description:** " + to_lower(matched_cmd->description) + "\n\n";
+                            desc += "**Description:** " + matched_cmd->description + "\n\n";
                         }
 
                         std::string syntax = prefix + matched_cmd->name;
@@ -184,18 +303,18 @@ public:
                         } else if (!matched_cmd->usage.empty()) {
                             syntax = matched_cmd->usage;
                         }
-                        desc += "**Syntax:** `" + to_lower(syntax) + "`\n";
+                        desc += "**Syntax:** `" + syntax + "`\n";
 
                         if (!matched_cmd->aliases.empty()) {
                             desc += "**Aliases:** ";
                             for (size_t a = 0; a < matched_cmd->aliases.size(); ++a) {
-                                desc += "`" + prefix + to_lower(matched_cmd->aliases[a]) + "`" + (a + 1 < matched_cmd->aliases.size() ? ", " : "");
+                                desc += "`" + prefix + matched_cmd->aliases[a] + "`" + (a + 1 < matched_cmd->aliases.size() ? ", " : "");
                             }
                             desc += "\n";
                         }
 
                         if (!matched_cmd->category.empty()) {
-                            desc += "**Category:** " + to_lower(matched_cmd->category) + "\n";
+                            desc += "**Category:** " + matched_cmd->category + "\n";
                         }
 
                         if (matched_cmd->required_permissions != 0) {
@@ -209,7 +328,7 @@ public:
                         if (!matched_cmd->subcommands.empty()) {
                             desc += "\n**Subcommands / Options:**\n";
                             for (const auto& sub : matched_cmd->subcommands) {
-                                desc += "• `" + to_lower(sub) + "`\n";
+                                desc += "• `" + sub + "`\n";
                             }
                         }
 
@@ -626,7 +745,7 @@ private:
         
         stoatpp::models::Embed embed;
         embed.set_colour(0x5865F2)
-             .set_title("help — " + to_lower(cat) + " (" + std::to_string(page + 1) + "/" + std::to_string(max_pages) + ")");
+             .set_title("Help — " + cat + " (" + std::to_string(page + 1) + "/" + std::to_string(max_pages) + ")");
 
         std::string desc = "";
 
@@ -651,15 +770,15 @@ private:
             } else if (!cmd.usage.empty()) {
                 syntax = cmd.usage;
             }
-            desc += "  *syntax:* `" + to_lower(syntax) + "`\n";
+            desc += "  *syntax:* `" + syntax + "`\n";
 
             if (!cmd.description.empty()) {
-                desc += "  *description:* " + to_lower(cmd.description) + "\n";
+                desc += "  *description:* " + cmd.description + "\n";
             }
 
             if (!cmd.subcommands.empty()) {
                 for (const auto& sub : cmd.subcommands) {
-                    desc += "  - `" + to_lower(sub) + "`\n";
+                    desc += "  - `" + sub + "`\n";
                 }
             }
             desc += "\n";
@@ -667,7 +786,7 @@ private:
 
         desc += "--- \n**categories:** ";
         for (size_t i = 0; i < categories.size(); ++i) {
-            std::string display_name = to_lower(categories[i]);
+            std::string display_name = categories[i];
             if (i == static_cast<size_t>(session.current_category_idx)) {
                 desc += "__**[" + display_name + "]**__";
             } else {

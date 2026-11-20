@@ -9,7 +9,7 @@ public:
     void register_handlers(stoatpp::cluster& bot) override {
         bot.register_command({
             "userinfo",
-            {"user", "profile", "ui"},
+            {"user", "profile", "ui", "whois"},
             "fetch information about a user.",
             "",
             {"[user]"},
@@ -87,7 +87,7 @@ public:
 
         bot.register_command({
             "avatar",
-            {"av"},
+            {"av", "pfp"},
             "fetch the avatar of a user.",
             "",
             {"[user]"},

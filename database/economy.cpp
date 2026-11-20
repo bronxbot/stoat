@@ -604,11 +604,11 @@ namespace bronx {
     mysql_query(mysql_, sql.c_str());
 
     std::string sql_rod =
-        "INSERT IGNORE INTO user_unlocked_rods (user_id, rod_id) VALUES ('" +
+        "INSERT IGNORE INTO unlocked_rods (user_id, rod_id) VALUES ('" +
         esc_uid + "', 'wooden_rod')";
     mysql_query(mysql_, sql_rod.c_str());
 
-    std::string sql_worm = "INSERT IGNORE INTO user_fish_baits (user_id, "
+    std::string sql_worm = "INSERT IGNORE INTO user_baits (user_id, "
                            "bait_id, quantity) VALUES ('" +
                            esc_uid + "', 'worm', 10)";
     mysql_query(mysql_, sql_worm.c_str());
@@ -983,7 +983,7 @@ namespace bronx {
     if (!mysql_)
       return false;
     std::string sql =
-        "INSERT INTO user_fish_inventory (user_id, fish_id, fish_name, rarity, "
+        "INSERT INTO fish_inventory (user_id, fish_id, fish_name, rarity, "
         "odds_percent, weight, value) VALUES ('" +
         escape_string(user_id) + "', '" + escape_string(fish_id) + "', '" +
         escape_string(fish_name) + "', '" + escape_string(rarity) + "', " +
@@ -999,7 +999,7 @@ namespace bronx {
       return list;
     std::string sql =
         "SELECT id, fish_id, fish_name, rarity, odds_percent, weight, value, "
-        "IFNULL(caught_at, '') FROM user_fish_inventory WHERE user_id = '" +
+        "IFNULL(caught_at, '') FROM fish_inventory WHERE user_id = '" +
         escape_string(user_id) + "' ORDER BY value DESC";
     if (mysql_query(mysql_, sql.c_str()) == 0) {
       MYSQL_RES *res = mysql_store_result(mysql_);
@@ -1029,11 +1029,11 @@ namespace bronx {
     if (!mysql_)
       return {0, 0};
 
-    int count;
-    int64_t total_val;
+    int count = 0;
+    int64_t total_val = 0;
     std::string esc_uid = escape_string(user_id);
     std::string sql_select = "SELECT COUNT(*), IFNULL(SUM(value), 0) FROM "
-                             "user_fish_inventory WHERE user_id = '" +
+                             "fish_inventory WHERE user_id = '" +
                              esc_uid + "'";
     if (mysql_query(mysql_, sql_select.c_str()) == 0) {
       MYSQL_RES *res = mysql_store_result(mysql_);
@@ -1049,8 +1049,13 @@ namespace bronx {
 
     if (count > 0) {
       std::string sql_del =
-          "DELETE FROM user_fish_inventory WHERE user_id = '" + esc_uid + "'";
-      mysql_query(mysql_, sql_del.c_str());
+          "DELETE FROM fish_inventory WHERE user_id = '" + esc_uid + "'";
+      if (mysql_query(mysql_, sql_del.c_str()) != 0 ||
+          mysql_affected_rows(mysql_) == 0) {
+        std::cerr << "[bronx db] sell_all_user_fish delete failed: "
+                  << mysql_error(mysql_) << "\n";
+        return {0, 0};
+      }
       std::string sql_add_coins = "UPDATE users SET wallet = wallet + " +
                                   std::to_string(total_val) +
                                   " WHERE user_id = '" + esc_uid + "'";
@@ -1069,13 +1074,13 @@ namespace bronx {
     if (!mysql_)
       return {0, 0};
 
-    int count;
-    int64_t total_val;
+    int count = 0;
+    int64_t total_val = 0;
     std::string esc_uid = escape_string(user_id);
     std::string esc_rarity = escape_string(rarity);
 
     std::string sql_select = "SELECT COUNT(*), IFNULL(SUM(value), 0) FROM "
-                             "user_fish_inventory WHERE user_id = '" +
+                             "fish_inventory WHERE user_id = '" +
                              esc_uid + "' AND LOWER(rarity) = LOWER('" +
                              esc_rarity + "')";
     if (mysql_query(mysql_, sql_select.c_str()) == 0) {
@@ -1092,9 +1097,14 @@ namespace bronx {
 
     if (count > 0) {
       std::string sql_del =
-          "DELETE FROM user_fish_inventory WHERE user_id = '" + esc_uid +
+          "DELETE FROM fish_inventory WHERE user_id = '" + esc_uid +
           "' AND LOWER(rarity) = LOWER('" + esc_rarity + "')";
-      mysql_query(mysql_, sql_del.c_str());
+      if (mysql_query(mysql_, sql_del.c_str()) != 0 ||
+          mysql_affected_rows(mysql_) == 0) {
+        std::cerr << "[bronx db] sell_user_fish_by_rarity delete failed: "
+                  << mysql_error(mysql_) << "\n";
+        return {0, 0};
+      }
       std::string sql_add_coins = "UPDATE users SET wallet = wallet + " +
                                   std::to_string(total_val) +
                                   " WHERE user_id = '" + esc_uid + "'";
@@ -1111,7 +1121,7 @@ namespace bronx {
     std::lock_guard<std::mutex> lock(db_mutex_);
     if (!mysql_)
       return false;
-    std::string sql = "UPDATE user_fish_inventory SET user_id = '" +
+    std::string sql = "UPDATE fish_inventory SET user_id = '" +
                       escape_string(recipient_id) + "' WHERE id = " +
                       std::to_string(fish_id) + " AND user_id = '" +
                       escape_string(sender_id) + "'";
@@ -1122,7 +1132,7 @@ namespace bronx {
     std::lock_guard<std::mutex> lock(db_mutex_);
     if (!mysql_)
       return false;
-    std::string sql = "DELETE FROM user_fish_inventory WHERE id = " +
+    std::string sql = "DELETE FROM fish_inventory WHERE id = " +
                       std::to_string(fish_id) + " AND user_id = '" +
                       escape_string(user_id) + "'";
     return mysql_query(mysql_, sql.c_str()) == 0 && mysql_affected_rows(mysql_) > 0;
@@ -1133,7 +1143,7 @@ namespace bronx {
     std::lock_guard<std::mutex> lock(db_mutex_);
     if (!mysql_)
       return 0;
-    std::string sql = "SELECT quantity FROM user_fish_baits WHERE user_id = '" +
+    std::string sql = "SELECT quantity FROM user_baits WHERE user_id = '" +
                       escape_string(user_id) + "' AND bait_id = '" +
                       escape_string(bait_id) + "'";
     if (mysql_query(mysql_, sql.c_str()) == 0) {
@@ -1158,7 +1168,7 @@ namespace bronx {
     if (!mysql_)
       return false;
     std::string sql =
-        "INSERT INTO user_fish_baits (user_id, bait_id, quantity) VALUES ('" +
+        "INSERT INTO user_baits (user_id, bait_id, quantity) VALUES ('" +
         escape_string(user_id) + "', '" + escape_string(bait_id) + "', " +
         std::to_string(quantity) +
         ") ON DUPLICATE KEY UPDATE quantity = quantity + " +
@@ -1171,7 +1181,7 @@ namespace bronx {
     std::lock_guard<std::mutex> lock(db_mutex_);
     if (!mysql_)
       return false;
-    std::string sql = "UPDATE user_fish_baits SET quantity = GREATEST(0, "
+    std::string sql = "UPDATE user_baits SET quantity = GREATEST(0, "
                       "quantity - 1) WHERE user_id = '" +
                       escape_string(user_id) + "' AND bait_id = '" +
                       escape_string(bait_id) + "'";
@@ -1185,7 +1195,7 @@ namespace bronx {
     if (!mysql_)
       return list;
     std::string sql =
-        "SELECT bait_id, quantity FROM user_fish_baits WHERE user_id = '" +
+        "SELECT bait_id, quantity FROM user_baits WHERE user_id = '" +
         escape_string(user_id) + "' AND quantity > 0";
     if (mysql_query(mysql_, sql.c_str()) == 0) {
       MYSQL_RES *res = mysql_store_result(mysql_);
@@ -1208,7 +1218,7 @@ namespace bronx {
     if (!mysql_)
       return false;
     std::string sql =
-        "INSERT IGNORE INTO user_unlocked_rods (user_id, rod_id) VALUES ('" +
+        "INSERT IGNORE INTO unlocked_rods (user_id, rod_id) VALUES ('" +
         escape_string(user_id) + "', '" + escape_string(rod_id) + "')";
     return mysql_query(mysql_, sql.c_str()) == 0;
   }
@@ -1220,7 +1230,7 @@ namespace bronx {
     if (!mysql_)
       return list;
     std::string sql =
-        "SELECT rod_id FROM user_unlocked_rods WHERE user_id = '" +
+        "SELECT rod_id FROM unlocked_rods WHERE user_id = '" +
         escape_string(user_id) + "'";
     if (mysql_query(mysql_, sql.c_str()) == 0) {
       MYSQL_RES *res = mysql_store_result(mysql_);
@@ -1241,7 +1251,7 @@ namespace bronx {
     std::lock_guard<std::mutex> lock(db_mutex_);
     if (!mysql_)
       return false;
-    std::string sql = "SELECT 1 FROM user_unlocked_rods WHERE user_id = '" +
+    std::string sql = "SELECT 1 FROM unlocked_rods WHERE user_id = '" +
                       escape_string(user_id) + "' AND rod_id = '" +
                       escape_string(rod_id) + "'";
     if (mysql_query(mysql_, sql.c_str()) == 0) {

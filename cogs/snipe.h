@@ -227,7 +227,7 @@ public:
         // --- .clearsnipe (requires Manage Messages) ---
         bot.register_command({
             "clearsnipe",
-            {},
+            {"cs"},
             "clear the snipe cache for this channel.",
             "",
             {},

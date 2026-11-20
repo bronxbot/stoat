@@ -33,6 +33,100 @@ private:
         return std::to_string(seconds) + "s";
     }
 
+    static int64_t parse_amount(std::string str, int64_t max_val = 0) {
+        std::transform(str.begin(), str.end(), str.begin(), ::tolower);
+        if (str == "all" || str == "max") return max_val;
+        if (str == "half") return max_val / 2;
+        try {
+            double mult = 1.0;
+            if (!str.empty() && str.back() == 'k') { mult = 1e3; str.pop_back(); }
+            else if (!str.empty() && str.back() == 'm') { mult = 1e6; str.pop_back(); }
+            else if (!str.empty() && str.back() == 'b') { mult = 1e9; str.pop_back(); }
+            double val = std::stod(str) * mult;
+            return static_cast<int64_t>(val);
+        } catch (...) {
+            return -1;
+        }
+    }
+
+    std::string prefix_for(const stoatpp::cluster& bot,
+                           const stoatpp::events::Message& msg) const {
+        return msg.prefix.empty() ? bot.config().command_prefix : msg.prefix;
+    }
+
+    void show_general_shop(stoatpp::cluster& bot,
+                           const stoatpp::events::Message& msg) {
+        if (!g_db) return;
+
+        stoatpp::models::MessagePayload payload;
+        payload.content = " ";
+        stoatpp::models::Embed embed;
+        embed.set_colour(0x2ECC71);
+        embed.set_title("🛒 Bronx General Economy Shop");
+
+        const std::string prefix = prefix_for(bot, msg);
+        std::string desc = "Buy with `" + prefix +
+                           "shop buy general <item_id> [quantity]`; activate "
+                           "owned items with `" + prefix + "use <item_id>`.\n\n";
+
+        desc += "🛡️ **`robbery_guard` — Robbery Guard**\n"
+                "   Price: **5,000** coins | Duration: **24 Hours**\n"
+                "   *Prevents anyone from robbing you for 24 hours while active.*\n\n";
+
+        desc += "💥 **`reverse_card` — Uno Reverse Card**\n"
+                "   Price: **15,000** coins | Duration: **24 Hours**\n"
+                "   *Gotcha trap! Anyone robbing you within 24 hours gets robbed back instead.*\n\n";
+
+        desc += "🔍 **`item_detector` — Item Detector**\n"
+                "   Price: **2,500** coins | Charges: **5 Uses**\n"
+                "   *Scans a target user to see if they have active protections or traps (`" +
+                prefix + "detect <user>`).*\n\n";
+
+        auto custom_items = g_db->get_custom_shop_items();
+        if (!custom_items.empty()) {
+            desc += "✨ **CUSTOM SHOP ITEMS:**\n";
+            for (const auto& item : custom_items) {
+                desc += "• `" + item.item_id + "` — **" + item.name + "** (" +
+                        std::to_string(item.cost) + " coins)\n   " +
+                        item.description + "\n";
+            }
+        }
+
+        desc += "\n*Check your items with `" + prefix + "inventory`.*";
+        embed.set_description(desc);
+        payload.add_embed(embed);
+        bot.send_message(msg.channel_id, payload);
+    }
+
+    bool route_shop_command(stoatpp::cluster& bot,
+                            const stoatpp::events::Message& msg,
+                            const std::string& command_name,
+                            const std::vector<std::string>& args) {
+        for (const auto& command : bot.get_commands()) {
+            if (command.name != command_name) continue;
+            if (command.cooldown_seconds > 0 || command.required_permissions > 0)
+                return false;
+
+            if (!msg.server_id.empty() && g_db) {
+                std::string name = command.name;
+                std::string category = command.category;
+                std::transform(name.begin(), name.end(), name.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                std::transform(category.begin(), category.end(), category.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+                if (g_db->is_disabled(msg.server_id, name, category)) {
+                    bot.send_message(msg.channel_id,
+                                     "That shop action is currently disabled in this server.");
+                    return true;
+                }
+            }
+
+            command.callback(bot, msg, args);
+            return true;
+        }
+        return false;
+    }
+
 public:
     void register_handlers(stoatpp::cluster& bot) override {
         // 1. balance command
@@ -58,6 +152,7 @@ public:
                     bot.send_message(msg.channel_id, "could not retrieve user data.");
                     return;
                 }
+                auto fishing = g_db->get_fishing_user(target_uid);
 
                 stoatpp::models::MessagePayload payload;
                 payload.content = " ";
@@ -71,7 +166,17 @@ public:
                     "wallet: **" + std::to_string(u->wallet) + "**\n"
                     "bank: **" + std::to_string(u->bank) + "** / **" + std::to_string(u->bank_limit) + "**\n"
                     "networth: **" + std::to_string(u->wallet + u->bank) + "**\n"
-                    "prestige: **" + std::to_string(u->prestige) + "**\n";
+                    "economy prestige: **" + std::to_string(u->prestige) + "**\n";
+                if (fishing) {
+                    desc += "fishing prestige: **Tier " +
+                            std::to_string(fishing->fish_prestige) + "**\n"
+                            "prestige tokens: **" +
+                            std::to_string(fishing->prestige_tokens) +
+                            "** 🪙 — spend with `" + bot.config().command_prefix +
+                            "fish shop prestige`";
+                } else {
+                    desc += "prestige tokens: unavailable";
+                }
                 embed.set_description(desc);
 
                 payload.add_embed(embed);
@@ -155,42 +260,58 @@ public:
             "pay",
             {"give", "transfer"},
             "gives coins from your wallet to another user.",
-            "pay <user> <amount>",
+            "pay <user> <amount> (or pay <amount> <user>)",
             {"<user>", "<amount>"},
             [this](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
                 if (!g_db) return;
 
                 if (args.size() < 2) {
-                    bot.send_message(msg.channel_id, "invalid syntax. use `pay <user> <amount>`.");
-                    return;
-                }
-
-                std::string target_uid = resolve_user_id(args[0]);
-                if (target_uid == msg.author.id) {
-                    bot.send_message(msg.channel_id, "you cannot pay yourself.");
-                    return;
-                }
-
-                int64_t amount = 0;
-                try {
-                    amount = std::stoll(args[1]);
-                } catch (...) {}
-
-                if (amount <= 0) {
-                    bot.send_message(msg.channel_id, "please provide a valid positive amount.");
+                    bot.send_message(msg.channel_id, "Usage: `pay <user> <amount>` (or `pay <amount> <user>`).");
                     return;
                 }
 
                 auto self = g_db->get_economy_user(msg.author.id);
-                if (!self || self->wallet < amount) {
-                    bot.send_message(msg.channel_id, "you do not have enough coins in your wallet.");
+                if (!self) return;
+
+                std::string target_uid;
+                int64_t amount = 0;
+
+                // Support both orders: pay <user> <amount> AND pay <amount> <user>
+                bool first_is_num = false;
+                try {
+                    int64_t parsed = parse_amount(args[0], self->wallet);
+                    if (parsed > 0) {
+                        amount = parsed;
+                        first_is_num = true;
+                    }
+                } catch (...) {}
+
+                if (first_is_num) {
+                    target_uid = resolve_user_id(args[1]);
+                } else {
+                    target_uid = resolve_user_id(args[0]);
+                    amount = parse_amount(args[1], self->wallet);
+                }
+
+                if (target_uid.empty() || target_uid == msg.author.id) {
+                    bot.send_message(msg.channel_id, "You cannot pay yourself or an invalid user.");
+                    return;
+                }
+
+                if (amount <= 0) {
+                    bot.send_message(msg.channel_id, "Please provide a valid positive amount. Usage: `pay <user> <amount>`");
+                    return;
+                }
+
+                if (self->wallet < amount) {
+                    bot.send_message(msg.channel_id, "You do not have enough coins in your wallet. (Wallet: **" + std::to_string(self->wallet) + "** coins)");
                     return;
                 }
 
                 g_db->update_balances(msg.author.id, -amount, 0);
                 g_db->update_balances(target_uid, amount, 0);
 
-                bot.send_message(msg.channel_id, "you paid **" + std::to_string(amount) + "** coins to <@" + target_uid + ">.");
+                bot.send_message(msg.channel_id, "💸 You paid **" + std::to_string(amount) + "** coins to <@" + target_uid + ">.");
             },
             "Economy"
         });
@@ -200,41 +321,34 @@ public:
             "deposit",
             {"dep"},
             "deposits coins from your wallet into your bank.",
-            "deposit <amount/all>",
+            "deposit <amount/all/half/1k/5m>",
             {"<amount>"},
             [this](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
                 if (!g_db) return;
 
                 if (args.empty()) {
-                    bot.send_message(msg.channel_id, "invalid syntax. use `deposit <amount/all>`.");
+                    bot.send_message(msg.channel_id, "Usage: `deposit <amount/all/half/1k/5m>`.");
                     return;
                 }
 
                 auto self = g_db->get_economy_user(msg.author.id);
                 if (!self) return;
 
-                int64_t amount = 0;
-                if (args[0] == "all" || args[0] == "max") {
-                    amount = self->wallet;
-                } else {
-                    try {
-                        amount = std::stoll(args[0]);
-                    } catch (...) {}
-                }
+                int64_t amount = parse_amount(args[0], self->wallet);
 
                 if (amount <= 0) {
-                    bot.send_message(msg.channel_id, "please provide a valid positive amount.");
+                    bot.send_message(msg.channel_id, "Please provide a valid positive amount (e.g. `deposit 500`, `dep all`, `dep half`, `dep 10k`).");
                     return;
                 }
 
                 if (self->wallet < amount) {
-                    bot.send_message(msg.channel_id, "you do not have enough coins in your wallet.");
+                    bot.send_message(msg.channel_id, "You do not have enough coins in your wallet. (Wallet: **" + std::to_string(self->wallet) + "** coins)");
                     return;
                 }
 
                 int64_t space_remaining = self->bank_limit - self->bank;
                 if (space_remaining <= 0) {
-                    bot.send_message(msg.channel_id, "your bank is already full.");
+                    bot.send_message(msg.channel_id, "Your bank is already full! (Cap: **" + std::to_string(self->bank_limit) + "** coins)");
                     return;
                 }
 
@@ -243,7 +357,7 @@ public:
                 }
 
                 g_db->update_balances(msg.author.id, -amount, amount);
-                bot.send_message(msg.channel_id, "you deposited **" + std::to_string(amount) + "** coins into your bank.");
+                bot.send_message(msg.channel_id, "🏦 Deposited **" + std::to_string(amount) + "** coins into your bank.");
             },
             "Economy"
         });
@@ -253,40 +367,33 @@ public:
             "withdraw",
             {"with"},
             "withdraws coins from your bank into your wallet.",
-            "withdraw <amount/all>",
+            "withdraw <amount/all/half/1k/5m>",
             {"<amount>"},
             [this](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
                 if (!g_db) return;
 
                 if (args.empty()) {
-                    bot.send_message(msg.channel_id, "invalid syntax. use `withdraw <amount/all>`.");
+                    bot.send_message(msg.channel_id, "Usage: `withdraw <amount/all/half/1k/5m>`.");
                     return;
                 }
 
                 auto self = g_db->get_economy_user(msg.author.id);
                 if (!self) return;
 
-                int64_t amount = 0;
-                if (args[0] == "all" || args[0] == "max") {
-                    amount = self->bank;
-                } else {
-                    try {
-                        amount = std::stoll(args[0]);
-                    } catch (...) {}
-                }
+                int64_t amount = parse_amount(args[0], self->bank);
 
                 if (amount <= 0) {
-                    bot.send_message(msg.channel_id, "please provide a valid positive amount.");
+                    bot.send_message(msg.channel_id, "Please provide a valid positive amount (e.g. `withdraw 500`, `with all`, `with half`, `with 10k`).");
                     return;
                 }
 
                 if (self->bank < amount) {
-                    bot.send_message(msg.channel_id, "you do not have enough coins in your bank.");
+                    bot.send_message(msg.channel_id, "You do not have enough coins in your bank. (Bank balance: **" + std::to_string(self->bank) + "** coins)");
                     return;
                 }
 
                 g_db->update_balances(msg.author.id, amount, -amount);
-                bot.send_message(msg.channel_id, "you withdrew **" + std::to_string(amount) + "** coins from your bank.");
+                bot.send_message(msg.channel_id, "💵 Withdrew **" + std::to_string(amount) + "** coins from your bank.");
             },
             "Economy"
         });
@@ -1119,7 +1226,10 @@ public:
                         desc += "• Total Catches: **" + std::to_string(fish->total_catches) + "** | Fishing Tier: **P" + std::to_string(fish->fish_prestige) + "**\n";
 
                         auto user_fish = g_db->get_user_fish_inventory(target_uid);
-                        desc += "• Bucket Inventory: **" + std::to_string(user_fish.size()) + "** fish in bucket (`.fish bucket`)\n";
+                        int64_t fish_val = 0;
+                        for (const auto& f : user_fish) fish_val += f.value;
+                        desc += "• Fish Bucket: **" + std::to_string(user_fish.size()) + "** fish (Value: **" + std::to_string(fish_val) + "** coins)\n"
+                                "  *Quick actions:* `" + prefix_for(bot, msg) + "sell` to cash in, `" + prefix_for(bot, msg) + "bucket` to inspect.\n";
                     } else {
                         desc += "*No fishing data available.*\n";
                     }
@@ -1135,49 +1245,222 @@ public:
         // 17. generalshop command
         bot.register_command({
             "generalshop",
-            {"shop", "store", "market"},
+            {},
             "opens the Bronx General Economy Item Shop.",
             "generalshop",
             {},
-            [this](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
-                if (!g_db) return;
-
-                stoatpp::models::MessagePayload payload;
-                payload.content = " ";
-                stoatpp::models::Embed embed;
-                embed.set_colour(0x2ECC71);
-                embed.set_title("🛒 Bronx General Economy Shop");
-
-                std::string desc = "Use `.buy <item_id> [quantity]` to purchase an item, and `.use <item_id>` to activate it!\n\n";
-
-                desc += "🛡️ **`robbery_guard` — Robbery Guard**\n"
-                        "   Price: **5,000** coins | Duration: **24 Hours**\n"
-                        "   *Prevents anyone from robbing you for 24 hours while active.*\n\n";
-
-                desc += "💥 **`reverse_card` — Uno Reverse Card**\n"
-                        "   Price: **15,000** coins | Duration: **24 Hours**\n"
-                        "   *Gotcha trap! Anyone robbing you within 24 hours gets robbed back instead.*\n\n";
-
-                desc += "🔍 **`item_detector` — Item Detector**\n"
-                        "   Price: **2,500** coins | Charges: **5 Uses**\n"
-                        "   *Scans a target user to see if they have active protections or traps (`.detect <user>`).*\n\n";
-
-                auto custom_items = g_db->get_custom_shop_items();
-                if (!custom_items.empty()) {
-                    desc += "✨ **CUSTOM SHOP ITEMS:**\n";
-                    for (const auto& item : custom_items) {
-                        desc += "• `" + item.item_id + "` — **" + item.name + "** (" + std::to_string(item.cost) + " coins)\n"
-                                "   " + item.description + "\n";
-                    }
-                }
-
-                desc += "*Tip: Check your items with `.inventory`!*";
-
-                embed.set_description(desc);
-                payload.add_embed(embed);
-                bot.send_message(msg.channel_id, payload);
+            [this](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>&) {
+                show_general_shop(bot, msg);
             },
             "Economy"
+        });
+
+        bot.register_command({
+            "shop",
+            {"store", "market"},
+            "browse and buy from every shop through one command.",
+            "shop [general|fishing|event|buy] [category/item] [quantity]",
+            {"[section]", "[category/item]", "[quantity]"},
+            [this](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                const std::string prefix = prefix_for(bot, msg);
+                if (args.empty() || args[0] == "help") {
+                    stoatpp::models::MessagePayload payload;
+                    payload.content = " ";
+                    stoatpp::models::Embed embed;
+                    embed.set_colour(0x2ECC71);
+                    embed.set_title("🛒 Bronx Shop");
+                    embed.set_description(
+                        "**Quick Browse:**\n"
+                        "• `" + prefix + "shop rods` — fishing rods & stats\n"
+                        "• `" + prefix + "shop bait` — fishing bait & luck rates\n"
+                        "• `" + prefix + "shop prestige` — prestige rods & perks\n"
+                        "• `" + prefix + "shop enchant` — rod enchants & upgrades\n"
+                        "• `" + prefix + "shop general` — shields, traps & detectors\n"
+                        "• `" + prefix + "shop event` — seasonal event rewards\n\n"
+                        "**Buy Anything:**\n"
+                        "• `" + prefix + "buy <item_id> [quantity]`\n"
+                        "• `" + prefix + "shop buy <item_id> [quantity]`\n\n"
+                        "*Examples:* `" + prefix + "buy worm 10`, `" +
+                        prefix + "buy abyssal_reaper`, `" + prefix + "buy robbery_guard`\n\n"
+                        "Your balance: `" + prefix + "balance`");
+                    payload.add_embed(embed);
+                    bot.send_message(msg.channel_id, payload);
+                    return;
+                }
+
+                std::string section = args[0];
+                std::transform(section.begin(), section.end(), section.begin(),
+                               [](unsigned char c) { return std::tolower(c); });
+
+                if (section == "general" || section == "items" || section == "economy") {
+                    if (args.size() > 1) {
+                        bot.send_message(msg.channel_id,
+                            "Use `" + prefix + "shop general` to browse general items.");
+                        return;
+                    }
+                    show_general_shop(bot, msg);
+                    return;
+                }
+
+                if (section == "fishing" || section == "fish" || section == "tackle") {
+                    std::vector<std::string> routed_args = {"shop"};
+                    if (args.size() >= 2) {
+                        if (args[1] == "buy") {
+                            if (args.size() > 4) {
+                                bot.send_message(msg.channel_id,
+                                    "Usage: `" + prefix +
+                                    "shop buy fishing <item_id> [quantity]`.");
+                                return;
+                            }
+                            routed_args = {"buy"};
+                            if (args.size() >= 3) routed_args.push_back(args[2]);
+                            if (args.size() >= 4) routed_args.push_back(args[3]);
+                        } else {
+                            if (args.size() > 2) {
+                                bot.send_message(msg.channel_id,
+                                    "Choose one category: `rods`, `prestige`, `bait`, "
+                                    "`prestige-bait`, or `enchant`.");
+                                return;
+                            }
+                            routed_args.push_back(args[1]);
+                        }
+                    }
+                    if (!route_shop_command(bot, msg, "fish", routed_args)) {
+                        bot.send_message(msg.channel_id, "Fishing shop is unavailable. Try `" + prefix + "shop fishing`.");
+                    }
+                    return;
+                }
+
+                if (section == "event" || section == "events") {
+                    std::vector<std::string> routed_args;
+                    if (args.size() > 1 && args[1] != "buy") {
+                        bot.send_message(msg.channel_id,
+                            "Use `" + prefix + "shop event` to browse event items.");
+                        return;
+                    }
+                    if (args.size() == 2 && args[1] == "buy") {
+                        bot.send_message(msg.channel_id,
+                            "Usage: `" + prefix + "shop buy event <item_id>`.");
+                        return;
+                    }
+                    if (args.size() >= 3 && args[1] == "buy" && args.size() > 3) {
+                        bot.send_message(msg.channel_id,
+                            "Event purchases are one item at a time: `" +
+                            prefix + "shop buy event <item_id>`.");
+                        return;
+                    }
+                    if (args.size() >= 3 && args[1] == "buy")
+                        routed_args = {"buy", args[2]};
+                    if (!route_shop_command(bot, msg, "event", routed_args)) {
+                        bot.send_message(msg.channel_id, "Event shop is unavailable. Try `" + prefix + "event`.");
+                    }
+                    return;
+                }
+
+                if (section == "buy") {
+                    if (args.size() < 2) {
+                        bot.send_message(msg.channel_id,
+                            "Usage: `" + prefix + "buy <item_id> [quantity]` or `" +
+                            prefix + "shop buy <item_id> [quantity]`.");
+                        return;
+                    }
+                    std::string store = args[1];
+                    std::transform(store.begin(), store.end(), store.begin(),
+                                   [](unsigned char c) { return std::tolower(c); });
+                    std::vector<std::string> routed_args;
+                    std::string command_name;
+                    if (store == "general" || store == "items" || store == "economy") {
+                        if (args.size() > 4) {
+                            bot.send_message(msg.channel_id,
+                                "Usage: `" + prefix +
+                                "shop buy general <item_id> [quantity]`.");
+                            return;
+                        }
+                        command_name = "buyitem";
+                        routed_args.assign(args.begin() + 2, args.end());
+                    } else if (store == "fishing" || store == "fish") {
+                        if (args.size() > 4) {
+                            bot.send_message(msg.channel_id,
+                                "Usage: `" + prefix +
+                                "shop buy fishing <item_id> [quantity]`.");
+                            return;
+                        }
+                        command_name = "fish";
+                        routed_args = {"buy"};
+                        routed_args.insert(routed_args.end(), args.begin() + 2, args.end());
+                    } else if (store == "event" || store == "events") {
+                        if (args.size() > 3) {
+                            bot.send_message(msg.channel_id,
+                                "Event purchases are one item at a time: `" +
+                                prefix + "shop buy event <item_id>`.");
+                            return;
+                        }
+                        command_name = "event";
+                        routed_args = {"buy"};
+                        routed_args.insert(routed_args.end(), args.begin() + 2, args.end());
+                    } else {
+                        // User typed .shop buy <item_id> [quantity] without specifying a category!
+                        std::string item_id = store;
+                        bool is_general = (item_id == "robbery_guard" || item_id == "guard" || item_id == "shield" ||
+                                           item_id == "reverse_card" || item_id == "reverse" || item_id == "uno_reverse" ||
+                                           item_id == "item_detector" || item_id == "detector" || item_id == "scanner");
+                        if (!is_general && g_db) {
+                            for (const auto& ci : g_db->get_custom_shop_items()) {
+                                if (ci.item_id == item_id) { is_general = true; break; }
+                            }
+                        }
+                        if (is_general) {
+                            command_name = "buyitem";
+                            routed_args.assign(args.begin() + 1, args.end());
+                        } else {
+                            command_name = "fish";
+                            routed_args = {"buy"};
+                            routed_args.insert(routed_args.end(), args.begin() + 1, args.end());
+                        }
+                    }
+                    if (!route_shop_command(bot, msg, command_name, routed_args)) {
+                        bot.send_message(msg.channel_id, "That shop is unavailable right now.");
+                    }
+                    return;
+                }
+
+                // Smart redirect: fishing categories used directly as section
+                // e.g. .shop rods → .shop fishing rods
+                static const std::unordered_set<std::string> fishing_cats = {
+                    "rod", "rods", "prestige", "prest", "bait", "baits",
+                    "prestige-bait", "prestigebait", "pb", "enchant", "enchants",
+                    "enchantment", "enchantments", "upgrade", "upgrades"
+                };
+                if (fishing_cats.count(section)) {
+                    std::vector<std::string> routed_args = {"shop", section};
+                    if (!route_shop_command(bot, msg, "fish", routed_args)) {
+                        bot.send_message(msg.channel_id, "Fishing shop is unavailable. Try `" + prefix + "shop fishing`.");
+                    }
+                    return;
+                }
+                // Try fuzzy match to give a helpful suggestion
+                static const std::vector<std::string> all_sections = {
+                    "general", "fishing", "event", "rods", "bait", "prestige", "enchant"
+                };
+                std::string closest;
+                size_t best = SIZE_MAX;
+                for (const auto& s : all_sections) {
+                    // Simple: check if section is a prefix of a known section
+                    if (s.rfind(section, 0) == 0 || section.rfind(s, 0) == 0) {
+                        closest = s;
+                        break;
+                    }
+                }
+                std::string hint = closest.empty()
+                    ? "Use `" + prefix + "shop` to see available sections."
+                    : "Did you mean `" + prefix + "shop " + closest + "`?";
+                bot.send_message(msg.channel_id,
+                    bronx::emj_no + " Unknown shop section `" + args[0] + "`. " + hint);
+            },
+            "Economy",
+            0,
+            0,
+            {"general", "fishing", "event", "buy"}
         });
 
         // 18. buyitem command
@@ -1191,7 +1474,9 @@ public:
                 if (!g_db) return;
 
                 if (args.empty()) {
-                    bot.send_message(msg.channel_id, "invalid syntax. use `buy <item_id> [quantity]`.");
+                    bot.send_message(msg.channel_id,
+                        "Usage: `" + prefix_for(bot, msg) +
+                        "shop buy general <item_id> [quantity]`.");
                     return;
                 }
 
@@ -1200,9 +1485,22 @@ public:
 
                 int qty = 1;
                 if (args.size() > 1) {
-                    try { qty = std::stoi(args[1]); } catch (...) {}
+                    try {
+                        size_t parsed = 0;
+                        qty = std::stoi(args[1], &parsed);
+                        if (parsed != args[1].size() || qty <= 0) {
+                            bot.send_message(msg.channel_id,
+                                "Quantity must be a positive whole number. Usage: `" +
+                                prefix_for(bot, msg) + "shop buy general <item_id> [quantity]`.");
+                            return;
+                        }
+                    } catch (const std::exception&) {
+                        bot.send_message(msg.channel_id,
+                            "Quantity must be a positive whole number. Usage: `" +
+                            prefix_for(bot, msg) + "shop buy general <item_id> [quantity]`.");
+                        return;
+                    }
                 }
-                if (qty <= 0) qty = 1;
 
                 int64_t unit_cost = 0;
                 int default_uses = 0;
@@ -1238,7 +1536,14 @@ public:
                         }
                     }
                     if (!found) {
-                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " Item `" + item_id + "` not found in general shop. Use `.shop` to see available items or `.fish shop` for fishing items.");
+                        // Check if it's a fishing item (rod, bait, enchant) by routing to fish buy!
+                        std::vector<std::string> routed_args = {"buy"};
+                        routed_args.insert(routed_args.end(), args.begin(), args.end());
+                        if (route_shop_command(bot, msg, "fish", routed_args)) {
+                            return;
+                        }
+                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " Item `" + item_id + "` not found in shop. Browse with `" +
+                                         prefix_for(bot, msg) + "shop`.");
                         return;
                     }
                 }

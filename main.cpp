@@ -1805,6 +1805,34 @@ int main(int argc, char *argv[]) {
     std::transform(mod_name.begin(), mod_name.end(), mod_name.begin(),
                    ::tolower);
 
+    if (cmd_name == "shop" && !args.empty()) {
+      std::vector<std::string> shop_args = args;
+      for (auto &arg : shop_args) {
+        std::transform(arg.begin(), arg.end(), arg.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+      }
+
+      if (shop_args[0] == "general" || shop_args[0] == "items" ||
+          shop_args[0] == "economy") {
+        cmd_name = "generalshop";
+      } else if (shop_args[0] == "fishing" || shop_args[0] == "fish" ||
+                 shop_args[0] == "tackle") {
+        cmd_name = "fish";
+      } else if (shop_args[0] == "event" || shop_args[0] == "events") {
+        cmd_name = "event";
+      } else if (shop_args[0] == "buy" && shop_args.size() >= 2) {
+        if (shop_args[1] == "general" || shop_args[1] == "items" ||
+            shop_args[1] == "economy") {
+          cmd_name = "buyitem";
+        } else if (shop_args[1] == "fishing" || shop_args[1] == "fish") {
+          cmd_name = "fish";
+        } else if (shop_args[1] == "event" || shop_args[1] == "events") {
+          cmd_name = "event";
+        }
+      }
+      mod_name = "economy";
+    }
+
     // 1. Completely Disabled Commands/Modules Check (ignores invocation
     // completely)
     if (bronx::g_db->is_disabled(msg.server_id, cmd_name, mod_name)) {

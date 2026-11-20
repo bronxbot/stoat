@@ -72,12 +72,12 @@ The bot checks for appropriate user/bot permissions. The default permissions req
 
 | Command | Syntax | Example | Description |
 | :--- | :--- | :--- | :--- |
-| `help` | `.help` or `.h` | `.help` | Launches an interactive tabbed help menu with pagination and category navigation. |
+| `help` | `.help [command\|keyword\|category]` or `.h` | `.help voice`; `.help ban`; `.help Moderation` | Search commands by name, alias, or description, or browse the interactive category menu. |
 | `ping` | `.ping` | `.ping` | Checks bot response latency and API heartbeat. |
 | `uptime` | `.uptime` | `.uptime` | Displays relative launch time and absolute runtime. |
 | `say` | `.say <text>` | `.say Hello world!` | Repeats text back to the channel. |
-| `remind` | `.remind <duration> <msg>` | `.remind 2h30m check oven` | Sets a reminder. Durations support `s`, `m`, `h`, `d`, `w`, `mo`, `y`. |
-| `reminders` | `.reminders` | `.reminders` | Lists all your active reminders. |
+| `remind` | `.remind <duration> <msg>` or `.remind list` | `.remind 2h30m check oven`; `.remind list` | Sets a reminder or lists active reminders. Durations support `s`, `m`, `h`, `d`, `w`, `mo`, `y`. |
+| `reminders` | `.reminders` | `.reminders` | Compatibility shortcut for `.remind list`. |
 
 > **Deleted Channel Reminder Fallback**: If a reminder becomes due but the target channel was deleted, Bronx automatically creates a direct message channel and DMs the reminder to the user.
 
@@ -217,7 +217,7 @@ Audit trail tracking for edits, deletes, joins, leaves, mod actions, and global 
 
 ---
 
-### 8. Anti-Raid Protection (`.antiraid` / `.ar`)
+### 8. Anti-Raid Protection (`.antiraid`)
 
 Automated protection against join floods, message spam, and suspicious account profiles. Settings are server-scoped and persist in the database. Only the **server owner**, **bot owner**, or **trusted users / Manage Server** members may configure these rules.
 
@@ -437,7 +437,7 @@ Create, edit, and batch-assign roles. Requires **Manage Roles** permission. Role
 
 ---
 
-### 16. Autoresponder (`.ar`), Autoreact (`.are`), Recurring (`.recurse`)
+### 16. Autoresponder (`.ar` / `.autoresponder`), Autoreact (`.are`), Recurring (`.recurse`)
 
 Keyword-triggered responses and reactions, plus scheduled recurring messages. All require **Manage Server** permission. Up to 25 autoresponders and 25 autoreacts per server.
 
@@ -485,6 +485,27 @@ Manage Roblox account linking and view rich profile details.
 | :--- | :--- | :--- | :--- |
 | `roblox set` | `.roblox set <username>` | `.roblox set siqnole` | Interactive account linking verification wizard. |
 | `roblox` | `.roblox [@user\|username]` | `.roblox @user` | Display a user's linked Roblox profile, or search by public username. Shows RAP, estimated value (Rolimons), socials (friends, followers, following), and 3D character renders. |
+
+---
+
+### 18. Voice & Music
+
+Bronx can join a voice channel and play YouTube audio through its WebRTC voice connection.
+Install `yt-dlp` and `ffmpeg` in the bot's runtime environment and make sure both are on `PATH`.
+Music playback is currently single-channel and YouTube-only.
+
+| Command | Syntax | Example | Description |
+| :--- | :--- | :--- | :--- |
+| `join` | `.join [channel_id_or_name]` | `.join`; `.join Lounge` | Join your current voice channel, or specify a voice channel. |
+| `play` | `.play <URL or search>` | `.play https://youtu.be/...`; `.play lo-fi beats` | Play or queue a YouTube video by URL or search. Aliases: `.p`, `.playyt`, `.yt`, `.youtube`. |
+| `queue` | `.queue` | `.queue` | Show the current track and upcoming tracks. Aliases: `.list`, `.q`. |
+| `skip` | `.skip` | `.skip` | Skip the current track. |
+| `pause` / `resume` | `.pause` / `.resume` | `.pause` | Pause or resume playback. |
+| `clear` | `.clear` | `.clear` | Remove queued tracks without stopping the current track. |
+| `volume` | `.volume <0-200>` | `.volume 80` | Set playback volume as a percentage. |
+| `leave` | `.leave` | `.leave` | Stop playback and leave voice. Aliases: `.part`, `.disconnect`, `.stop`. |
+
+Users must be in the bot's current voice channel to control playback. `.join` without an argument and `.play` auto-detect the user's channel from voice state updates; if detection is unavailable, specify the channel ID with `.join`.
 
 ---
 
