@@ -1643,9 +1643,10 @@ public:
                 payload.content = " ";
                 stoatpp::models::Embed embed;
                 embed.set_colour(0xF1C40F);
-                embed.set_title("🔍 Item Detector Scan Results — <@" + target_uid + ">");
+                auto scanned_u = bot.get_user(target_uid);
+                embed.set_title(scanned_u ? ("🔍 Item Detector Scan — " + scanned_u->username) : "🔍 Item Detector Scan Results");
 
-                std::string desc = "Scan completed! 1 Detector charge used.\n\n";
+                std::string desc = "**Target:** <@" + target_uid + ">\nScan completed! 1 Detector charge used.\n\n";
 
                 desc += "🛡️ **Robbery Guard Status:** " + std::string(guard_active ? "🟢 **ACTIVE (PROTECTED)**" : "🔴 Inactive") + "\n";
                 desc += "💥 **Uno Reverse Card Status:** " + std::string(reverse_active ? "🟢 **ARMED (GOTCHA TRAP ACTIVE!)**" : "🔴 Inactive") + "\n\n";

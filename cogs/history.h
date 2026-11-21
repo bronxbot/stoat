@@ -148,7 +148,8 @@ public:
                     if (target_user_id.empty()) {
                         embed.set_title("📋 Moderation History");
                     } else {
-                        embed.set_title("📋 Moderation History — User: <@" + target_user_id + ">");
+                        auto tu = bot.get_user(target_user_id);
+                        embed.set_title(tu ? ("📋 Moderation History — " + tu->username) : "📋 Moderation History");
                     }
 
                     auto action_emoji = [](const std::string& a) -> std::string {
@@ -163,8 +164,11 @@ public:
                     };
 
                     std::string desc;
+                    if (!target_user_id.empty()) {
+                        desc += "**User:** <@" + target_user_id + ">\n\n";
+                    }
                     if (entries.empty()) {
-                        desc = "*No moderation actions found.*";
+                        desc += "*No moderation actions found.*";
                     } else {
                         for (const auto& entry : entries) {
                             desc += action_emoji(entry.action) + " **" + entry.action + "**";
@@ -275,13 +279,12 @@ public:
 
                         if (type == "cmd_history_user") {
                             auto entries = g_db->get_server_command_history_by_user(server_id, target_query, offset, limit, total_count);
-                            // We don't have the user object in the reaction event to easily get the username, 
-                            // but we can query it using target_query as user ID in the mention.
-                            embed.set_title("📋 Command History — User: <@" + target_query + ">");
+                            auto tu = bot.get_user(target_query);
+                            embed.set_title(tu ? ("📋 Command History — " + tu->username) : "📋 Command History");
                             
-                            std::string desc;
+                            std::string desc = "**User:** <@" + target_query + ">\n\n";
                             if (entries.empty()) {
-                                desc = "*No command history found for this user.*";
+                                desc += "*No command history found for this user.*";
                             } else {
                                 for (const auto& entry : entries) {
                                     desc += "• `." + entry.command_name + "` | used in <#" + entry.channel_id + "> | " + stoatpp::utils::format_timestamp(entry.created_at, "R") + "\n";
@@ -310,7 +313,8 @@ public:
                             if (target_query.empty()) {
                                 embed.set_title("📋 Moderation History");
                             } else {
-                                embed.set_title("📋 Moderation History — User: <@" + target_query + ">");
+                                auto tu = bot.get_user(target_query);
+                                embed.set_title(tu ? ("📋 Moderation History — " + tu->username) : "📋 Moderation History");
                             }
 
                             auto action_emoji = [](const std::string& a) -> std::string {
@@ -325,8 +329,11 @@ public:
                             };
 
                             std::string desc;
+                            if (!target_query.empty()) {
+                                desc += "**User:** <@" + target_query + ">\n\n";
+                            }
                             if (entries.empty()) {
-                                desc = "*No moderation actions found.*";
+                                desc += "*No moderation actions found.*";
                             } else {
                                 for (const auto& entry : entries) {
                                     desc += action_emoji(entry.action) + " **" + entry.action + "**";

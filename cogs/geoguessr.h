@@ -858,10 +858,12 @@ private:
 
         stoatpp::models::Embed embed;
         embed.set_colour(0xF1C40F); // Gold
-        embed.set_title("🌍 GeoGuessr Player Stats — <@" + target_user + ">");
+        auto geo_u = bot.get_user(target_user);
+        embed.set_title(geo_u ? ("🌍 GeoGuessr Player Stats — " + geo_u->username) : "🌍 GeoGuessr Player Stats");
         
         std::stringstream ss;
-        ss << "🏆 **Total Points**: " << st.points << "\n"
+        ss << "👤 **Player**: <@" << target_user << ">\n"
+           << "🏆 **Total Points**: " << st.points << "\n"
            << "🎮 **Games Played**: " << st.games_played << "\n"
            << "🚩 **Correct Countries**: " << st.correct_countries << " (" << (int)win_rate << "% success)\n"
            << "🎯 **Exact City Guesses**: " << st.exact_cities << "\n"

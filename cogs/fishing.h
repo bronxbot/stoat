@@ -897,7 +897,9 @@ public:
     payload.content = " ";
     stoatpp::models::Embed embed;
     embed.set_colour(0xFFD700);
-    embed.set_title("🏆 Fishing Profile & Flex — <@" + target_uid + ">");
+    auto target_u = bot.get_user(target_uid);
+    embed.set_title(target_u ? ("🏆 Fishing Profile & Flex — " + target_u->username)
+                             : "🏆 Fishing Profile & Flex");
 
     std::ostringstream ss_wt;
     ss_wt << std::fixed << std::setprecision(1) << u.total_weight;
@@ -913,7 +915,8 @@ public:
                                   pdef->description + ")")
                                : "`None`";
 
-    std::string desc = "🔮 **Prestige Level:** Tier " +
+    std::string desc = "👤 **Angler:** <@" + target_uid + ">\n"
+                       "🔮 **Prestige Level:** Tier " +
                        std::to_string(u.fish_prestige) + " (" +
                        std::to_string(u.prestige_tokens) +
                        " Tokens)\n"
@@ -2860,7 +2863,7 @@ public:
              payload.content = " ";
              stoatpp::models::Embed embed;
              embed.set_colour(0x3498DB);
-             embed.set_title("🐟 Bronx Fish Bucket — <@" + msg.author.id + ">");
+             embed.set_title("🐟 Bronx Fish Bucket — " + msg.author.username);
 
              if (inv.empty()) {
                embed.set_description("Your fish bucket is empty! Cast your "
