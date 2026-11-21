@@ -388,7 +388,22 @@ public:
       double effective_luck = total_luck * bait->rarity_boost *
                               (1.0 + u.rod_rare_level * 0.10) * pet_rarity_boost;
       if (effective_luck < 1.0) effective_luck = 1.0;
-      w *= std::pow(effective_luck, tier * 0.14);
+      // Concave tier-progressive exponents: rods/baits reliably upgrade everyday
+      // catches into Rare/Epic/Legendary while keeping Mythic+ true jackpot hits.
+      static constexpr double kTierExponents[10] = {
+          0.00, // Common
+          0.12, // Uncommon
+          0.24, // Rare
+          0.34, // Epic
+          0.42, // Legendary
+          0.48, // Mythic
+          0.52, // Exotic
+          0.55, // Divine
+          0.58, // Singularity
+          0.60  // Multivertic
+      };
+      int idx = std::min(tier, 9);
+      w *= std::pow(effective_luck, kTierExponents[idx]);
     }
 
     if (rod->id == "nebula_starlight_rod" && fish.rarity == "Mythic") {
