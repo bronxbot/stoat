@@ -388,7 +388,7 @@ public:
       double effective_luck = total_luck * bait->rarity_boost *
                               (1.0 + u.rod_rare_level * 0.10) * pet_rarity_boost;
       if (effective_luck < 1.0) effective_luck = 1.0;
-      w *= std::pow(effective_luck, tier * 0.25);
+      w *= std::pow(effective_luck, tier * 0.14);
     }
 
     if (rod->id == "nebula_starlight_rod" && fish.rarity == "Mythic") {
