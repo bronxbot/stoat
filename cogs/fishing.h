@@ -384,23 +384,27 @@ public:
     }
 
     double w = fish.base_odds;
+    if (tier >= 5) {
+      // Keep Mythic+ genuine jackpot dopamine hits (~1/1000 Mythic, ~1/10k Exotic,
+      // ~1/100k Divine, ~1/1M Singularity, ~1/5M+ Multivertic) while still scaling
+      // strictly monotonically with luck.
+      w *= 0.12;
+    }
     if (tier > 0) {
       double effective_luck = total_luck * bait->rarity_boost *
                               (1.0 + u.rod_rare_level * 0.10) * pet_rarity_boost;
       if (effective_luck < 1.0) effective_luck = 1.0;
-      // Concave tier-progressive exponents: rods/baits reliably upgrade everyday
-      // catches into Rare/Epic/Legendary while keeping Mythic+ true jackpot hits.
       static constexpr double kTierExponents[10] = {
           0.00, // Common
           0.12, // Uncommon
           0.24, // Rare
           0.34, // Epic
           0.42, // Legendary
-          0.48, // Mythic
-          0.52, // Exotic
-          0.55, // Divine
-          0.58, // Singularity
-          0.60  // Multivertic
+          0.43, // Mythic
+          0.44, // Exotic
+          0.45, // Divine
+          0.46, // Singularity
+          0.47  // Multivertic
       };
       int idx = std::min(tier, 9);
       w *= std::pow(effective_luck, kTierExponents[idx]);
