@@ -367,6 +367,48 @@ public:
     return -1;
   }
 
+  double compute_fish_weight(const FishDef &fish,
+                             const RodDef *rod,
+                             const BaitDef *bait,
+                             const RodEffectDef *effect,
+                             const bronx::Database::FishingUser &u,
+                             double total_luck,
+                             double pet_rarity_boost) const {
+    int tier = get_rarity_precedence(fish.rarity);
+    if (tier < 0) tier = 0;
+
+    // Multivertic rarity is unlocked at Prestige 5+ or with Multiverse/God rods
+    if (tier >= 9 && u.fish_prestige < 5 &&
+        rod->id != "multiverse_rod" && rod->id != "multivertic_god_rod") {
+      return 0.0;
+    }
+
+    double w = fish.base_odds;
+    if (tier > 0) {
+      double effective_luck = total_luck * bait->rarity_boost *
+                              (1.0 + u.rod_rare_level * 0.10) * pet_rarity_boost;
+      if (effective_luck < 1.0) effective_luck = 1.0;
+      w *= std::pow(effective_luck, tier * 0.25);
+    }
+
+    if (rod->id == "nebula_starlight_rod" && fish.rarity == "Mythic") {
+      w *= 2.0;
+    }
+    if (effect->special_flag == "nebula" &&
+        (fish.rarity == "Mythic" || fish.rarity == "Exotic")) {
+      w *= 3.0;
+    }
+    if (effect->special_flag == "godslayer" &&
+        (fish.rarity == "Divine" || fish.rarity == "Singularity" ||
+         fish.rarity == "Multivertic")) {
+      w *= 5.0;
+    }
+    if (rod->id == "multivertic_god_rod" && fish.rarity == "Multivertic") {
+      w *= 5.0;
+    }
+    return w;
+  }
+
   std::optional<bronx::Database::CaughtFish> find_prestige_qualifying_fish(
       const std::vector<bronx::Database::CaughtFish> &inv,
       const std::string &req_rarity,
@@ -2348,24 +2390,8 @@ public:
              std::vector<std::pair<std::string, double>> fish_rates;
 
              for (const auto &f : fish_pool_) {
-               double w = f.base_odds;
-               if (f.rarity != "Common") {
-                 w *= total_luck * matched_bait->rarity_boost *
-                      (1.0 + u.rod_rare_level * 0.10) * pet_rarity_boost;
-               }
-               if (effect->special_flag == "nebula" &&
-                   (f.rarity == "Mythic" || f.rarity == "Exotic")) {
-                 w *= 3.0;
-               }
-               if (effect->special_flag == "godslayer" &&
-                   (f.rarity == "Divine" || f.rarity == "Singularity" ||
-                    f.rarity == "Multivertic")) {
-                 w *= 5.0;
-               }
-               if (rod->id == "multivertic_god_rod" &&
-                   f.rarity == "Multivertic") {
-                 w *= 5.0;
-               }
+               double w = compute_fish_weight(f, rod, matched_bait, effect, u,
+                                              total_luck, pet_rarity_boost);
 
                tier_weights[f.rarity] += w;
                total_weight += w;
@@ -2461,24 +2487,8 @@ public:
                double target_weight = 0.0;
 
                for (const auto &f : fish_pool_) {
-                 double w = f.base_odds;
-                 if (f.rarity != "Common") {
-                   w *= total_luck * sb->rarity_boost *
-                        (1.0 + u.rod_rare_level * 0.10) * pet_rarity_boost;
-                 }
-                 if (effect->special_flag == "nebula" &&
-                     (f.rarity == "Mythic" || f.rarity == "Exotic")) {
-                   w *= 3.0;
-                 }
-                 if (effect->special_flag == "godslayer" &&
-                     (f.rarity == "Divine" || f.rarity == "Singularity" ||
-                      f.rarity == "Multivertic")) {
-                   w *= 5.0;
-                 }
-                 if (rod->id == "multivertic_god_rod" &&
-                     f.rarity == "Multivertic") {
-                   w *= 5.0;
-                 }
+                 double w = compute_fish_weight(f, rod, sb, effect, u,
+                                                total_luck, pet_rarity_boost);
 
                  total_weight += w;
                  if (f.id == matched_fish->id) {
@@ -2580,6 +2590,8 @@ public:
                calc_cd -= 5;
              if (rod->id == "chronos_anchor")
                calc_cd = calc_cd / 2;
+             if (rod->id == "void_walker_rod")
+               calc_cd = static_cast<int>(calc_cd * 0.4);
              if (calc_cd < 2)
                calc_cd = 2; // min 2s cooldown
 
@@ -2625,24 +2637,8 @@ public:
              std::vector<double> weights;
 
              for (const auto &fish : fish_pool_) {
-               double w = fish.base_odds;
-               if (fish.rarity != "Common") {
-                 w *= total_luck * bait->rarity_boost *
-                      (1.0 + u.rod_rare_level * 0.10) * pet_rarity_boost;
-               }
-               if (effect->special_flag == "nebula" &&
-                   (fish.rarity == "Mythic" || fish.rarity == "Exotic")) {
-                 w *= 3.0;
-               }
-               if (effect->special_flag == "godslayer" &&
-                   (fish.rarity == "Divine" || fish.rarity == "Singularity" ||
-                    fish.rarity == "Multivertic")) {
-                 w *= 5.0;
-               }
-               if (rod->id == "multivertic_god_rod" &&
-                   fish.rarity == "Multivertic") {
-                 w *= 5.0;
-               }
+               double w = compute_fish_weight(fish, rod, bait, effect, u,
+                                              total_luck, pet_rarity_boost);
 
                weights.push_back(w);
                total_weight += w;
@@ -2665,8 +2661,12 @@ public:
              int64_t base_val = v_dist(gen);
 
              // Apply value multipliers from rod, effect, pet, prestige
+             double prestige_val_mult = 1.0 + (u.fish_prestige * 0.25);
              double val_mult =
-                 effect->value_mult * pet_val_mult * u.perm_val_mult;
+                 effect->value_mult * pet_val_mult * u.perm_val_mult *
+                 prestige_val_mult;
+             if (rod->id == "magma_forge_rod")
+               val_mult *= 1.15;
              if (rod->id == "poseidons_trident")
                val_mult *= 1.5;
              if (rod->id == "solar_flare_rod")
@@ -2680,8 +2680,14 @@ public:
              double double_catch_chance = (u.rod_double_level * 0.05) +
                                           effect->double_catch_bonus +
                                           pet_dc_bonus;
+             if (rod->id == "quantum_tether")
+               double_catch_chance += 0.10;
+             if (rod->id == "hydra_striker")
+               double_catch_chance += 0.20;
              if (rod->id == "abyssal_reaper")
                double_catch_chance += 0.25;
+             if (rod->id == "void_walker_rod")
+               double_catch_chance += 0.35;
 
              std::uniform_real_distribution<double> dc_dist(0.0, 1.0);
              bool is_double_catch = (dc_dist(gen) < double_catch_chance);
