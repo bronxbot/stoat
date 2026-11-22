@@ -306,6 +306,28 @@ inline bool is_role_dangerous(const stoatpp::models::Role& r) {
 class ReactionRolesModule : public stoatpp::bot_module {
 
 public:
+    static std::string sanitize_table_cell(std::string s) {
+        for (char& c : s) {
+            if (c == '|' || c == '\n' || c == '\r') c = ' ';
+        }
+        return s;
+    }
+
+    static std::string format_rr_modals_page(const std::vector<bronx::ModalInfo>& modals, int page, int max_pages) {
+        const size_t per_page = 8;
+        size_t start_idx = static_cast<size_t>(page) * per_page;
+        std::string desc = "| modal | rules | messages |\n| --- | --- | --- |\n";
+        for (size_t i = start_idx; i < start_idx + per_page && i < modals.size(); ++i) {
+            desc += "| **" + sanitize_table_cell(modals[i].name) + "** | " +
+                    std::to_string(modals[i].rule_count) + " | " +
+                    std::to_string(modals[i].message_count) + " |\n";
+        }
+        if (max_pages > 1) {
+            desc += "\n(page " + std::to_string(page + 1) + " of " + std::to_string(max_pages) + ")";
+        }
+        return desc;
+    }
+
     void register_handlers(stoatpp::cluster& bot) override {
         bot.register_command({
             "rr",
@@ -1364,21 +1386,12 @@ public:
                         return a.name < b.name;
                     });
 
-                    int max_pages = (modals.size() + 4) / 5;
+                    int max_pages = (modals.size() + 7) / 8;
                     stoatpp::models::MessagePayload payload;
                     nlohmann::json embed = nlohmann::json::object();
-                    embed["title"] = "reaction role modals list";
+                    embed["title"] = "reaction role modals";
                     embed["colour"] = "#6C5CE7";
-
-                    std::string desc = "here are all configured modals in this server:\n\n";
-                    for (size_t i = 0; i < 5 && i < modals.size(); ++i) {
-                        desc += "• **" + modals[i].name + "**: " + std::to_string(modals[i].rule_count) + 
-                                " rules mapped across " + std::to_string(modals[i].message_count) + " active messages.\n";
-                    }
-                    if (max_pages > 1) {
-                        desc += "\n(page 1 of " + std::to_string(max_pages) + ")";
-                    }
-                    embed["description"] = desc;
+                    embed["description"] = format_rr_modals_page(modals, 0, max_pages);
                     payload.embeds.push_back(embed);
 
                     bot.send_message(msg.channel_id, payload, [&bot, msg, max_pages](stoatpp::models::Message res, bool ok) {
@@ -1792,17 +1805,9 @@ public:
 
                         stoatpp::models::MessagePayload payload;
                         nlohmann::json embed = nlohmann::json::object();
-                        embed["title"] = "reaction role modals list";
+                        embed["title"] = "reaction role modals";
                         embed["colour"] = "#6C5CE7";
-
-                        std::string desc = "here are all configured modals in this server:\n\n";
-                        size_t start_idx = page * 5;
-                        for (size_t i = start_idx; i < start_idx + 5 && i < modals.size(); ++i) {
-                            desc += "• **" + modals[i].name + "**: " + std::to_string(modals[i].rule_count) + 
-                                    " rules mapped across " + std::to_string(modals[i].message_count) + " active messages.\n";
-                        }
-                        desc += "\n(page " + std::to_string(page + 1) + " of " + std::to_string(max_pages) + ")";
-                        embed["description"] = desc;
+                        embed["description"] = format_rr_modals_page(modals, page, max_pages);
                         payload.embeds.push_back(embed);
                         payload.content = " ";
 
