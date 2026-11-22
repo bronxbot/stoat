@@ -78,6 +78,7 @@ static void handle_shutdown_signal(int sig) {
 #include "cogs/filter.h"
 #include "cogs/fishing.h"
 #include "cogs/gambling.h"
+#include "cogs/rpg.h"
 #include "cogs/games.h"
 #include "cogs/geoguessr.h"
 #include "cogs/giveaway.h"
@@ -689,6 +690,7 @@ int main(int argc, char *argv[]) {
   bot.use(std::make_unique<bronx::cogs::QteModule>());
   bot.use(std::make_unique<bronx::cogs::GamesModule>());
   bot.use(std::make_unique<bronx::cogs::GamblingModule>());
+  bot.use(std::make_unique<bronx::cogs::RpgModule>());
   bot.use(std::make_unique<bronx::cogs::GeoGuessrModule>());
   bot.use(std::make_unique<bronx::cogs::WelcomeLeaveModule>());
   bot.use(std::make_unique<bronx::cogs::LoggingModule>());

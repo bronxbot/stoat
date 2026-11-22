@@ -1545,6 +1545,93 @@ bool Database::init_tables() {
                         "  biggest_win BIGINT NOT NULL DEFAULT 0"
                         ")");
 
+    // RPG & Progression tables (mining, pets, skills, mastery, daily streaks/challenges, titles, achievements)
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS user_mining ("
+                        "  user_id VARCHAR(64) PRIMARY KEY,"
+                        "  pickaxe_id VARCHAR(64) NOT NULL DEFAULT 'hands',"
+                        "  pickaxe_level INT NOT NULL DEFAULT 0,"
+                        "  total_ores_mined BIGINT NOT NULL DEFAULT 0,"
+                        "  total_ore_value_sold BIGINT NOT NULL DEFAULT 0,"
+                        "  last_mine BIGINT NOT NULL DEFAULT 0"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS user_unlocked_pickaxes ("
+                        "  user_id VARCHAR(64) NOT NULL,"
+                        "  pickaxe_id VARCHAR(64) NOT NULL,"
+                        "  PRIMARY KEY (user_id, pickaxe_id)"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS user_ores ("
+                        "  user_id VARCHAR(64) NOT NULL,"
+                        "  ore_name VARCHAR(64) NOT NULL,"
+                        "  quantity BIGINT NOT NULL DEFAULT 0,"
+                        "  total_value BIGINT NOT NULL DEFAULT 0,"
+                        "  PRIMARY KEY (user_id, ore_name)"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS user_companion_pets ("
+                        "  pet_id BIGINT AUTO_INCREMENT PRIMARY KEY,"
+                        "  user_id VARCHAR(64) NOT NULL,"
+                        "  species_id VARCHAR(64) NOT NULL,"
+                        "  nickname VARCHAR(64) NOT NULL,"
+                        "  level INT NOT NULL DEFAULT 1,"
+                        "  xp INT NOT NULL DEFAULT 0,"
+                        "  hunger INT NOT NULL DEFAULT 100,"
+                        "  equipped BOOLEAN NOT NULL DEFAULT FALSE,"
+                        "  last_fed BIGINT NOT NULL DEFAULT 0,"
+                        "  INDEX idx_user_comp_pets (user_id)"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS user_skills ("
+                        "  user_id VARCHAR(64) NOT NULL,"
+                        "  skill_id VARCHAR(64) NOT NULL,"
+                        "  rank_val INT NOT NULL DEFAULT 0,"
+                        "  PRIMARY KEY (user_id, skill_id)"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS user_mastery ("
+                        "  user_id VARCHAR(64) NOT NULL,"
+                        "  category VARCHAR(16) NOT NULL,"
+                        "  species_name VARCHAR(64) NOT NULL,"
+                        "  count_val BIGINT NOT NULL DEFAULT 0,"
+                        "  PRIMARY KEY (user_id, category, species_name)"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS user_daily_streaks ("
+                        "  user_id VARCHAR(64) PRIMARY KEY,"
+                        "  current_streak INT NOT NULL DEFAULT 0,"
+                        "  longest_streak INT NOT NULL DEFAULT 0,"
+                        "  last_claim_date VARCHAR(16) NOT NULL DEFAULT '',"
+                        "  total_claims INT NOT NULL DEFAULT 0,"
+                        "  total_streak_bonus BIGINT NOT NULL DEFAULT 0"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS user_daily_challenges ("
+                        "  user_id VARCHAR(64) NOT NULL,"
+                        "  date_str VARCHAR(16) NOT NULL,"
+                        "  slot_idx INT NOT NULL,"
+                        "  challenge_id VARCHAR(64) NOT NULL,"
+                        "  target_val BIGINT NOT NULL DEFAULT 1,"
+                        "  progress_val BIGINT NOT NULL DEFAULT 0,"
+                        "  reward_coins BIGINT NOT NULL DEFAULT 25000,"
+                        "  claimed BOOLEAN NOT NULL DEFAULT FALSE,"
+                        "  PRIMARY KEY (user_id, date_str, slot_idx)"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS user_titles ("
+                        "  user_id VARCHAR(64) NOT NULL,"
+                        "  title_id VARCHAR(64) NOT NULL,"
+                        "  equipped BOOLEAN NOT NULL DEFAULT FALSE,"
+                        "  PRIMARY KEY (user_id, title_id)"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS user_achievements ("
+                        "  user_id VARCHAR(64) NOT NULL,"
+                        "  achievement_id VARCHAR(64) NOT NULL,"
+                        "  claimed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+                        "  PRIMARY KEY (user_id, achievement_id)"
+                        ")");
+
     return true;
 }
 

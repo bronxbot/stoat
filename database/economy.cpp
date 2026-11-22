@@ -1650,4 +1650,525 @@ namespace bronx {
     return {winner_id, pool};
   }
 
+  Database::UserMiningProfile Database::get_user_mining(const std::string &user_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    UserMiningProfile p;
+    p.user_id = user_id;
+    if (!mysql_) return p;
+    std::string esc = escape_string(user_id);
+    mysql_query(mysql_, ("INSERT IGNORE INTO user_mining (user_id) VALUES ('" + esc + "')").c_str());
+    mysql_query(mysql_, ("INSERT IGNORE INTO user_unlocked_pickaxes (user_id, pickaxe_id) VALUES ('" + esc + "', 'hands')").c_str());
+    std::string sql = "SELECT pickaxe_id, pickaxe_level, total_ores_mined, total_ore_value_sold, last_mine FROM user_mining WHERE user_id = '" + esc + "'";
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        if (MYSQL_ROW row = mysql_fetch_row(res)) {
+          p.pickaxe_id = row[0] ? row[0] : "hands";
+          p.pickaxe_level = row[1] ? std::stoi(row[1]) : 0;
+          p.total_ores_mined = row[2] ? std::stoll(row[2]) : 0;
+          p.total_ore_value_sold = row[3] ? std::stoll(row[3]) : 0;
+          p.last_mine = row[4] ? std::stoll(row[4]) : 0;
+        }
+        mysql_free_result(res);
+      }
+    }
+    return p;
+  }
+
+  void Database::save_user_mining(const UserMiningProfile &p) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    std::string esc_u = escape_string(p.user_id);
+    std::string esc_p = escape_string(p.pickaxe_id);
+    std::string sql = "INSERT INTO user_mining (user_id, pickaxe_id, pickaxe_level, total_ores_mined, total_ore_value_sold, last_mine) VALUES ('" +
+                      esc_u + "', '" + esc_p + "', " + std::to_string(p.pickaxe_level) + ", " +
+                      std::to_string(p.total_ores_mined) + ", " + std::to_string(p.total_ore_value_sold) + ", " +
+                      std::to_string(p.last_mine) + ") ON DUPLICATE KEY UPDATE pickaxe_id = '" + esc_p +
+                      "', pickaxe_level = " + std::to_string(p.pickaxe_level) +
+                      ", total_ores_mined = " + std::to_string(p.total_ores_mined) +
+                      ", total_ore_value_sold = " + std::to_string(p.total_ore_value_sold) +
+                      ", last_mine = " + std::to_string(p.last_mine);
+    mysql_query(mysql_, sql.c_str());
+  }
+
+  std::vector<std::string> Database::get_unlocked_pickaxes(const std::string &user_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    std::vector<std::string> out;
+    if (!mysql_) return out;
+    std::string esc = escape_string(user_id);
+    mysql_query(mysql_, ("INSERT IGNORE INTO user_unlocked_pickaxes (user_id, pickaxe_id) VALUES ('" + esc + "', 'hands')").c_str());
+    std::string sql = "SELECT pickaxe_id FROM user_unlocked_pickaxes WHERE user_id = '" + esc + "'";
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+          if (row[0]) out.push_back(row[0]);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return out;
+  }
+
+  void Database::unlock_pickaxe(const std::string &user_id, const std::string &pickaxe_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    std::string sql = "INSERT IGNORE INTO user_unlocked_pickaxes (user_id, pickaxe_id) VALUES ('" +
+                      escape_string(user_id) + "', '" + escape_string(pickaxe_id) + "')";
+    mysql_query(mysql_, sql.c_str());
+  }
+
+  void Database::add_mined_ore(const std::string &user_id, const std::string &ore_name, int64_t qty, int64_t val) {
+    if (qty <= 0) return;
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    std::string esc_u = escape_string(user_id);
+    std::string esc_o = escape_string(ore_name);
+    std::string sql = "INSERT INTO user_ores (user_id, ore_name, quantity, total_value) VALUES ('" +
+                      esc_u + "', '" + esc_o + "', " + std::to_string(qty) + ", " + std::to_string(val) +
+                      ") ON DUPLICATE KEY UPDATE quantity = quantity + " + std::to_string(qty) +
+                      ", total_value = total_value + " + std::to_string(val);
+    mysql_query(mysql_, sql.c_str());
+  }
+
+  std::vector<Database::UserOreEntry> Database::get_user_ores(const std::string &user_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    std::vector<UserOreEntry> out;
+    if (!mysql_) return out;
+    std::string sql = "SELECT ore_name, quantity, total_value FROM user_ores WHERE user_id = '" +
+                      escape_string(user_id) + "' AND quantity > 0 ORDER BY total_value DESC";
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+          UserOreEntry e;
+          e.ore_name = row[0] ? row[0] : "";
+          e.quantity = row[1] ? std::stoll(row[1]) : 0;
+          e.total_value = row[2] ? std::stoll(row[2]) : 0;
+          out.push_back(e);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return out;
+  }
+
+  bool Database::consume_user_ore(const std::string &user_id, const std::string &ore_name, int64_t qty) {
+    if (qty <= 0) return true;
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return false;
+    std::string esc_u = escape_string(user_id);
+    std::string esc_o = escape_string(ore_name);
+    std::string sel = "SELECT quantity, total_value FROM user_ores WHERE user_id = '" + esc_u + "' AND ore_name = '" + esc_o + "'";
+    int64_t cur_q = 0, cur_v = 0;
+    if (mysql_query(mysql_, sel.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        if (MYSQL_ROW row = mysql_fetch_row(res)) {
+          cur_q = row[0] ? std::stoll(row[0]) : 0;
+          cur_v = row[1] ? std::stoll(row[1]) : 0;
+        }
+        mysql_free_result(res);
+      }
+    }
+    if (cur_q < qty) return false;
+    int64_t rem_q = cur_q - qty;
+    int64_t rem_v = (cur_q > 0) ? ((cur_v * rem_q) / cur_q) : 0;
+    if (rem_q <= 0) {
+      mysql_query(mysql_, ("DELETE FROM user_ores WHERE user_id = '" + esc_u + "' AND ore_name = '" + esc_o + "'").c_str());
+    } else {
+      mysql_query(mysql_, ("UPDATE user_ores SET quantity = " + std::to_string(rem_q) + ", total_value = " + std::to_string(rem_v) +
+                           " WHERE user_id = '" + esc_u + "' AND ore_name = '" + esc_o + "'").c_str());
+    }
+    return true;
+  }
+
+  int64_t Database::sell_user_ores(const std::string &user_id, const std::string &filter_ore) {
+    int64_t sold_val = 0;
+    {
+      std::lock_guard<std::mutex> lock(db_mutex_);
+      if (!mysql_) return 0;
+      std::string esc_u = escape_string(user_id);
+      std::string where = " WHERE user_id = '" + esc_u + "' AND quantity > 0";
+      if (!filter_ore.empty()) {
+        where += " AND LOWER(ore_name) = LOWER('" + escape_string(filter_ore) + "')";
+      }
+      if (mysql_query(mysql_, ("SELECT IFNULL(SUM(total_value), 0) FROM user_ores" + where).c_str()) == 0) {
+        if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+          if (MYSQL_ROW row = mysql_fetch_row(res)) {
+            if (row[0]) sold_val = std::stoll(row[0]);
+          }
+          mysql_free_result(res);
+        }
+      }
+      if (sold_val <= 0) return 0;
+      mysql_query(mysql_, ("DELETE FROM user_ores" + where).c_str());
+      mysql_query(mysql_, ("UPDATE user_mining SET total_ore_value_sold = total_ore_value_sold + " + std::to_string(sold_val) +
+                           " WHERE user_id = '" + esc_u + "'").c_str());
+    }
+    return sold_val;
+  }
+
+  std::vector<Database::UserPetEntry> Database::get_user_companion_pets(const std::string &user_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    std::vector<UserPetEntry> out;
+    if (!mysql_) return out;
+    std::string sql = "SELECT pet_id, species_id, nickname, level, xp, hunger, equipped, last_fed FROM user_companion_pets WHERE user_id = '" +
+                      escape_string(user_id) + "' ORDER BY equipped DESC, level DESC, pet_id ASC";
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+          UserPetEntry p;
+          p.pet_id = row[0] ? std::stoll(row[0]) : 0;
+          p.user_id = user_id;
+          p.species_id = row[1] ? row[1] : "";
+          p.nickname = row[2] ? row[2] : "";
+          p.level = row[3] ? std::stoi(row[3]) : 1;
+          p.xp = row[4] ? std::stoi(row[4]) : 0;
+          p.hunger = row[5] ? std::stoi(row[5]) : 100;
+          p.equipped = row[6] && (std::string(row[6]) == "1");
+          p.last_fed = row[7] ? std::stoll(row[7]) : 0;
+          out.push_back(p);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return out;
+  }
+
+  bool Database::adopt_user_pet(const std::string &user_id, const std::string &species_id, const std::string &nickname) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return false;
+    int64_t now_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    std::string esc_u = escape_string(user_id);
+    bool first_pet = true;
+    if (mysql_query(mysql_, ("SELECT COUNT(*) FROM user_companion_pets WHERE user_id = '" + esc_u + "'").c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        if (MYSQL_ROW row = mysql_fetch_row(res)) {
+          if (row[0] && std::stoi(row[0]) > 0) first_pet = false;
+        }
+        mysql_free_result(res);
+      }
+    }
+    std::string sql = "INSERT INTO user_companion_pets (user_id, species_id, nickname, level, xp, hunger, equipped, last_fed) VALUES ('" +
+                      esc_u + "', '" + escape_string(species_id) + "', '" + escape_string(nickname) +
+                      "', 1, 0, 100, " + (first_pet ? "1" : "0") + ", " + std::to_string(now_s) + ")";
+    return mysql_query(mysql_, sql.c_str()) == 0;
+  }
+
+  bool Database::feed_user_pet(const std::string &user_id, int64_t pet_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return false;
+    int64_t now_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    std::string sql = "UPDATE user_companion_pets SET hunger = 100, last_fed = " + std::to_string(now_s) +
+                      " WHERE user_id = '" + escape_string(user_id) + "' AND pet_id = " + std::to_string(pet_id);
+    return mysql_query(mysql_, sql.c_str()) == 0 && mysql_affected_rows(mysql_) > 0;
+  }
+
+  bool Database::equip_user_pet(const std::string &user_id, int64_t pet_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return false;
+    std::string esc_u = escape_string(user_id);
+    mysql_query(mysql_, ("UPDATE user_companion_pets SET equipped = 0 WHERE user_id = '" + esc_u + "'").c_str());
+    std::string sql = "UPDATE user_companion_pets SET equipped = 1 WHERE user_id = '" + esc_u + "' AND pet_id = " + std::to_string(pet_id);
+    return mysql_query(mysql_, sql.c_str()) == 0 && mysql_affected_rows(mysql_) > 0;
+  }
+
+  bool Database::rename_user_pet(const std::string &user_id, int64_t pet_id, const std::string &new_name) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return false;
+    std::string sql = "UPDATE user_companion_pets SET nickname = '" + escape_string(new_name) +
+                      "' WHERE user_id = '" + escape_string(user_id) + "' AND pet_id = " + std::to_string(pet_id);
+    return mysql_query(mysql_, sql.c_str()) == 0 && mysql_affected_rows(mysql_) > 0;
+  }
+
+  bool Database::release_user_pet(const std::string &user_id, int64_t pet_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return false;
+    std::string sql = "DELETE FROM user_companion_pets WHERE user_id = '" + escape_string(user_id) + "' AND pet_id = " + std::to_string(pet_id);
+    return mysql_query(mysql_, sql.c_str()) == 0 && mysql_affected_rows(mysql_) > 0;
+  }
+
+  void Database::add_equipped_pet_xp(const std::string &user_id, int xp_gain) {
+    auto pets = get_user_companion_pets(user_id);
+    for (const auto &p : pets) {
+      if (!p.equipped) continue;
+      int new_xp = p.xp + xp_gain;
+      int new_lvl = p.level;
+      while (new_lvl < 50 && new_xp >= (new_lvl * 50)) {
+        new_xp -= (new_lvl * 50);
+        new_lvl++;
+      }
+      std::lock_guard<std::mutex> lock(db_mutex_);
+      if (!mysql_) return;
+      std::string sql = "UPDATE user_companion_pets SET level = " + std::to_string(new_lvl) + ", xp = " + std::to_string(new_xp) +
+                        " WHERE pet_id = " + std::to_string(p.pet_id);
+      mysql_query(mysql_, sql.c_str());
+      break;
+    }
+  }
+
+  std::map<std::string, int> Database::get_user_skills(const std::string &user_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    std::map<std::string, int> out;
+    if (!mysql_) return out;
+    std::string sql = "SELECT skill_id, rank_val FROM user_skills WHERE user_id = '" + escape_string(user_id) + "' AND rank_val > 0";
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+          if (row[0] && row[1]) out[row[0]] = std::stoi(row[1]);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return out;
+  }
+
+  void Database::set_user_skill_rank(const std::string &user_id, const std::string &skill_id, int rank_val) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    std::string sql = "INSERT INTO user_skills (user_id, skill_id, rank_val) VALUES ('" +
+                      escape_string(user_id) + "', '" + escape_string(skill_id) + "', " + std::to_string(rank_val) +
+                      ") ON DUPLICATE KEY UPDATE rank_val = " + std::to_string(rank_val);
+    mysql_query(mysql_, sql.c_str());
+  }
+
+  void Database::clear_user_skills(const std::string &user_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    mysql_query(mysql_, ("DELETE FROM user_skills WHERE user_id = '" + escape_string(user_id) + "'").c_str());
+  }
+
+  void Database::increment_mastery(const std::string &user_id, const std::string &category, const std::string &species_name, int64_t delta) {
+    if (delta <= 0) return;
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    std::string sql = "INSERT INTO user_mastery (user_id, category, species_name, count_val) VALUES ('" +
+                      escape_string(user_id) + "', '" + escape_string(category) + "', '" + escape_string(species_name) + "', " +
+                      std::to_string(delta) + ") ON DUPLICATE KEY UPDATE count_val = count_val + " + std::to_string(delta);
+    mysql_query(mysql_, sql.c_str());
+  }
+
+  int64_t Database::get_species_mastery(const std::string &user_id, const std::string &category, const std::string &species_name) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return 0;
+    std::string sql = "SELECT count_val FROM user_mastery WHERE user_id = '" + escape_string(user_id) +
+                      "' AND category = '" + escape_string(category) + "' AND LOWER(species_name) = LOWER('" + escape_string(species_name) + "')";
+    int64_t val = 0;
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        if (MYSQL_ROW row = mysql_fetch_row(res)) {
+          if (row[0]) val = std::stoll(row[0]);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return val;
+  }
+
+  std::map<std::string, int64_t> Database::get_category_mastery(const std::string &user_id, const std::string &category) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    std::map<std::string, int64_t> out;
+    if (!mysql_) return out;
+    std::string sql = "SELECT species_name, count_val FROM user_mastery WHERE user_id = '" + escape_string(user_id) +
+                      "' AND category = '" + escape_string(category) + "' AND count_val > 0";
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+          if (row[0] && row[1]) out[row[0]] = std::stoll(row[1]);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return out;
+  }
+
+  Database::UserStreakInfo Database::get_user_streak(const std::string &user_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    UserStreakInfo st;
+    if (!mysql_) return st;
+    std::string sql = "SELECT current_streak, longest_streak, last_claim_date, total_claims, total_streak_bonus FROM user_daily_streaks WHERE user_id = '" +
+                      escape_string(user_id) + "'";
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        if (MYSQL_ROW row = mysql_fetch_row(res)) {
+          st.current_streak = row[0] ? std::stoi(row[0]) : 0;
+          st.longest_streak = row[1] ? std::stoi(row[1]) : 0;
+          st.last_claim_date = row[2] ? row[2] : "";
+          st.total_claims = row[3] ? std::stoi(row[3]) : 0;
+          st.total_streak_bonus = row[4] ? std::stoll(row[4]) : 0;
+        }
+        mysql_free_result(res);
+      }
+    }
+    return st;
+  }
+
+  void Database::save_user_streak(const std::string &user_id, const UserStreakInfo &st) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    std::string esc_u = escape_string(user_id);
+    std::string esc_d = escape_string(st.last_claim_date);
+    std::string sql = "INSERT INTO user_daily_streaks (user_id, current_streak, longest_streak, last_claim_date, total_claims, total_streak_bonus) VALUES ('" +
+                      esc_u + "', " + std::to_string(st.current_streak) + ", " + std::to_string(st.longest_streak) + ", '" + esc_d + "', " +
+                      std::to_string(st.total_claims) + ", " + std::to_string(st.total_streak_bonus) + ") ON DUPLICATE KEY UPDATE "
+                      "current_streak = " + std::to_string(st.current_streak) + ", longest_streak = " + std::to_string(st.longest_streak) +
+                      ", last_claim_date = '" + esc_d + "', total_claims = " + std::to_string(st.total_claims) +
+                      ", total_streak_bonus = " + std::to_string(st.total_streak_bonus);
+    mysql_query(mysql_, sql.c_str());
+  }
+
+  std::vector<Database::UserDailyChallengeEntry> Database::get_user_daily_challenges(const std::string &user_id, const std::string &date_str) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    std::vector<UserDailyChallengeEntry> out;
+    if (!mysql_) return out;
+    std::string sql = "SELECT slot_idx, challenge_id, target_val, progress_val, reward_coins, claimed FROM user_daily_challenges WHERE user_id = '" +
+                      escape_string(user_id) + "' AND date_str = '" + escape_string(date_str) + "' ORDER BY slot_idx ASC";
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+          UserDailyChallengeEntry e;
+          e.slot_idx = row[0] ? std::stoi(row[0]) : 0;
+          e.challenge_id = row[1] ? row[1] : "";
+          e.target_val = row[2] ? std::stoll(row[2]) : 1;
+          e.progress_val = row[3] ? std::stoll(row[3]) : 0;
+          e.reward_coins = row[4] ? std::stoll(row[4]) : 25000;
+          e.claimed = row[5] && (std::string(row[5]) == "1");
+          out.push_back(e);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return out;
+  }
+
+  void Database::save_user_daily_challenge(const std::string &user_id, const std::string &date_str, const UserDailyChallengeEntry &entry) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    std::string sql = "INSERT INTO user_daily_challenges (user_id, date_str, slot_idx, challenge_id, target_val, progress_val, reward_coins, claimed) VALUES ('" +
+                      escape_string(user_id) + "', '" + escape_string(date_str) + "', " + std::to_string(entry.slot_idx) + ", '" +
+                      escape_string(entry.challenge_id) + "', " + std::to_string(entry.target_val) + ", " + std::to_string(entry.progress_val) + ", " +
+                      std::to_string(entry.reward_coins) + ", " + (entry.claimed ? "1" : "0") + ") ON DUPLICATE KEY UPDATE "
+                      "progress_val = " + std::to_string(entry.progress_val) + ", claimed = " + (entry.claimed ? "1" : "0");
+    mysql_query(mysql_, sql.c_str());
+  }
+
+  void Database::increment_daily_challenge_progress(const std::string &user_id, const std::string &date_str, const std::string &challenge_id, int64_t delta) {
+    if (delta <= 0) return;
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    std::string sql = "UPDATE user_daily_challenges SET progress_val = LEAST(target_val, progress_val + " + std::to_string(delta) +
+                      ") WHERE user_id = '" + escape_string(user_id) + "' AND date_str = '" + escape_string(date_str) +
+                      "' AND challenge_id = '" + escape_string(challenge_id) + "'";
+    mysql_query(mysql_, sql.c_str());
+  }
+
+  std::vector<std::pair<std::string, bool>> Database::get_user_titles(const std::string &user_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    std::vector<std::pair<std::string, bool>> out;
+    if (!mysql_) return out;
+    std::string sql = "SELECT title_id, equipped FROM user_titles WHERE user_id = '" + escape_string(user_id) + "'";
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+          if (row[0]) out.push_back({row[0], row[1] && std::string(row[1]) == "1"});
+        }
+        mysql_free_result(res);
+      }
+    }
+    return out;
+  }
+
+  bool Database::has_user_title(const std::string &user_id, const std::string &title_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return false;
+    std::string sql = "SELECT 1 FROM user_titles WHERE user_id = '" + escape_string(user_id) + "' AND title_id = '" + escape_string(title_id) + "'";
+    bool found = false;
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        if (mysql_fetch_row(res)) found = true;
+        mysql_free_result(res);
+      }
+    }
+    return found;
+  }
+
+  int Database::count_title_owners(const std::string &title_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return 0;
+    std::string sql = "SELECT COUNT(*) FROM user_titles WHERE title_id = '" + escape_string(title_id) + "'";
+    int c = 0;
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        if (MYSQL_ROW row = mysql_fetch_row(res)) {
+          if (row[0]) c = std::stoi(row[0]);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return c;
+  }
+
+  void Database::grant_user_title(const std::string &user_id, const std::string &title_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    std::string sql = "INSERT IGNORE INTO user_titles (user_id, title_id, equipped) VALUES ('" +
+                      escape_string(user_id) + "', '" + escape_string(title_id) + "', 0)";
+    mysql_query(mysql_, sql.c_str());
+  }
+
+  bool Database::equip_user_title(const std::string &user_id, const std::string &title_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return false;
+    std::string esc_u = escape_string(user_id);
+    mysql_query(mysql_, ("UPDATE user_titles SET equipped = 0 WHERE user_id = '" + esc_u + "'").c_str());
+    if (title_id.empty() || title_id == "none" || title_id == "clear") return true;
+    std::string sql = "UPDATE user_titles SET equipped = 1 WHERE user_id = '" + esc_u + "' AND title_id = '" + escape_string(title_id) + "'";
+    return mysql_query(mysql_, sql.c_str()) == 0 && mysql_affected_rows(mysql_) > 0;
+  }
+
+  std::string Database::get_equipped_title(const std::string &user_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return "";
+    std::string sql = "SELECT title_id FROM user_titles WHERE user_id = '" + escape_string(user_id) + "' AND equipped = 1 LIMIT 1";
+    std::string tid;
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        if (MYSQL_ROW row = mysql_fetch_row(res)) {
+          if (row[0]) tid = row[0];
+        }
+        mysql_free_result(res);
+      }
+    }
+    return tid;
+  }
+
+  std::vector<std::string> Database::get_claimed_achievements(const std::string &user_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    std::vector<std::string> out;
+    if (!mysql_) return out;
+    std::string sql = "SELECT achievement_id FROM user_achievements WHERE user_id = '" + escape_string(user_id) + "'";
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      if (MYSQL_RES *res = mysql_store_result(mysql_)) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+          if (row[0]) out.push_back(row[0]);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return out;
+  }
+
+  void Database::claim_achievement(const std::string &user_id, const std::string &achievement_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    std::string sql = "INSERT IGNORE INTO user_achievements (user_id, achievement_id) VALUES ('" +
+                      escape_string(user_id) + "', '" + escape_string(achievement_id) + "')";
+    mysql_query(mysql_, sql.c_str());
+  }
+
 } // namespace bronx

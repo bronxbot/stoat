@@ -305,6 +305,89 @@ public:
   int64_t get_lottery_participant_count();
   std::pair<std::string, int64_t> draw_lottery_winner();
 
+  // RPG & Progression structs and methods
+  struct UserMiningProfile {
+    std::string user_id;
+    std::string pickaxe_id = "hands";
+    int pickaxe_level = 0;
+    int64_t total_ores_mined = 0;
+    int64_t total_ore_value_sold = 0;
+    int64_t last_mine = 0;
+  };
+  struct UserOreEntry {
+    std::string ore_name;
+    int64_t quantity = 0;
+    int64_t total_value = 0;
+  };
+  struct UserPetEntry {
+    int64_t pet_id = 0;
+    std::string user_id;
+    std::string species_id;
+    std::string nickname;
+    int level = 1;
+    int xp = 0;
+    int hunger = 100;
+    bool equipped = false;
+    int64_t last_fed = 0;
+  };
+  struct UserStreakInfo {
+    int current_streak = 0;
+    int longest_streak = 0;
+    std::string last_claim_date;
+    int total_claims = 0;
+    int64_t total_streak_bonus = 0;
+  };
+  struct UserDailyChallengeEntry {
+    int slot_idx = 0;
+    std::string challenge_id;
+    int64_t target_val = 1;
+    int64_t progress_val = 0;
+    int64_t reward_coins = 25000;
+    bool claimed = false;
+  };
+
+  UserMiningProfile get_user_mining(const std::string &user_id);
+  void save_user_mining(const UserMiningProfile &p);
+  std::vector<std::string> get_unlocked_pickaxes(const std::string &user_id);
+  void unlock_pickaxe(const std::string &user_id, const std::string &pickaxe_id);
+  void add_mined_ore(const std::string &user_id, const std::string &ore_name, int64_t qty, int64_t val);
+  std::vector<UserOreEntry> get_user_ores(const std::string &user_id);
+  bool consume_user_ore(const std::string &user_id, const std::string &ore_name, int64_t qty);
+  int64_t sell_user_ores(const std::string &user_id, const std::string &filter_ore = "");
+
+  std::vector<UserPetEntry> get_user_companion_pets(const std::string &user_id);
+  bool adopt_user_pet(const std::string &user_id, const std::string &species_id, const std::string &nickname);
+  bool feed_user_pet(const std::string &user_id, int64_t pet_id);
+  bool equip_user_pet(const std::string &user_id, int64_t pet_id);
+  bool rename_user_pet(const std::string &user_id, int64_t pet_id, const std::string &new_name);
+  bool release_user_pet(const std::string &user_id, int64_t pet_id);
+  void add_equipped_pet_xp(const std::string &user_id, int xp_gain);
+
+  std::map<std::string, int> get_user_skills(const std::string &user_id);
+  void set_user_skill_rank(const std::string &user_id, const std::string &skill_id, int rank_val);
+  void clear_user_skills(const std::string &user_id);
+
+  void increment_mastery(const std::string &user_id, const std::string &category, const std::string &species_name, int64_t delta = 1);
+  int64_t get_species_mastery(const std::string &user_id, const std::string &category, const std::string &species_name);
+  std::map<std::string, int64_t> get_category_mastery(const std::string &user_id, const std::string &category);
+
+  UserStreakInfo get_user_streak(const std::string &user_id);
+  void save_user_streak(const std::string &user_id, const UserStreakInfo &st);
+
+  std::vector<UserDailyChallengeEntry> get_user_daily_challenges(const std::string &user_id, const std::string &date_str);
+  void save_user_daily_challenge(const std::string &user_id, const std::string &date_str, const UserDailyChallengeEntry &entry);
+  void increment_daily_challenge_progress(const std::string &user_id, const std::string &date_str, const std::string &challenge_id, int64_t delta);
+
+  std::vector<std::pair<std::string, bool>> get_user_titles(const std::string &user_id);
+  bool has_user_title(const std::string &user_id, const std::string &title_id);
+  int count_title_owners(const std::string &title_id);
+  void grant_user_title(const std::string &user_id, const std::string &title_id);
+  bool equip_user_title(const std::string &user_id, const std::string &title_id);
+  std::string get_equipped_title(const std::string &user_id);
+
+  std::vector<std::string> get_claimed_achievements(const std::string &user_id);
+  void claim_achievement(const std::string &user_id, const std::string &achievement_id);
+
   bool update_balances(const std::string &user_id, int64_t wallet_delta,
                        int64_t bank_delta);
 
