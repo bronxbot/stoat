@@ -140,6 +140,10 @@ public:
                             const std::string &user_id, bool is_owner = false,
                             bool is_admin = false);
 
+  void upsert_server_members_batch(
+      const std::string &server_id,
+      const std::vector<std::pair<std::string, bool>> &members);
+
   bool is_server_owner(const std::string &server_id, const std::string &user_id);
 
   void print_cache_stats();

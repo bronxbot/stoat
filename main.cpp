@@ -955,21 +955,25 @@ int main(int argc, char *argv[]) {
             }
           }
           if (res.body.contains("members") && res.body["members"].is_array()) {
+            std::vector<std::pair<std::string, bool>> member_batch;
+            member_batch.reserve(res.body["members"].size());
             for (const auto &item : res.body["members"]) {
               auto m = stoatpp::models::Member::from_json(item);
               if (m.server_id.empty())
                 m.server_id = srv.id;
               bot.cache_member(m);
               total_cached_members++;
-              if (bronx::g_db && !m.id.empty() && !srv.id.empty()) {
+              if (!m.id.empty() && !srv.id.empty()) {
                 bool is_owner = (!srv.owner.empty() && srv.owner == m.id);
-                bronx::g_db->upsert_server_member(srv.id, m.id, is_owner,
-                                                  false);
+                member_batch.emplace_back(m.id, is_owner);
               }
+            }
+            if (bronx::g_db && !member_batch.empty()) {
+              bronx::g_db->upsert_server_members_batch(srv.id, member_batch);
             }
           }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
       }
       s_last_cache_time = std::chrono::steady_clock::now();
       s_caching_in_progress.store(false);

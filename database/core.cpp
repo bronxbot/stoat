@@ -207,6 +207,38 @@ connected:
     mysql_query(mysql_, sql.c_str());
   }
 
+  void Database::upsert_server_members_batch(
+      const std::string &server_id,
+      const std::vector<std::pair<std::string, bool>> &members) {
+    if (server_id.empty() || members.empty())
+      return;
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return;
+
+    std::string esc_sid = escape_string(server_id);
+    const size_t chunk_size = 200;
+    for (size_t i = 0; i < members.size(); i += chunk_size) {
+      std::string sql =
+          "INSERT INTO server_members (server_id, user_id, is_owner, is_admin) VALUES ";
+      bool first = true;
+      size_t end = std::min(i + chunk_size, members.size());
+      for (size_t j = i; j < end; ++j) {
+        if (members[j].first.empty())
+          continue;
+        if (!first)
+          sql += ",";
+        first = false;
+        sql += "('" + esc_sid + "','" + escape_string(members[j].first) + "'," +
+               (members[j].second ? "1" : "0") + ",0)";
+      }
+      if (!first) {
+        sql += " ON DUPLICATE KEY UPDATE is_owner=VALUES(is_owner)";
+        mysql_query(mysql_, sql.c_str());
+      }
+    }
+  }
+
   void Database::print_cache_stats() {
     std::cout << "           loaded " << masquerade_cache_.size()
               << " masquerade configurations.\n"
