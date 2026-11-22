@@ -3408,28 +3408,6 @@ public:
                  return;
                }
 
-               if (sub == "tokens") {
-                 auto u_opt = g_db->get_fishing_user(msg.author.id);
-                 if (!u_opt) {
-                   bot.send_message(msg.channel_id,
-                                    "Could not retrieve your Fishing Token balance.");
-                   return;
-                 }
-
-                 bot.send_message(
-                     msg.channel_id,
-                     "🪙 **Prestige Tokens:** " +
-                         std::to_string(u_opt->prestige_tokens) +
-                         "\nSpend them on prestige rods with `" +
-                         bot.config().command_prefix +
-                         "fish shop prestige`, prestige bait on shop page 6, or "
-                         "rod enchants on page 7. Buy an item with `" +
-                         bot.config().command_prefix + "fish buy <item_id>`.\n"
-                         "Earn more by reaching Fishing Prestige tiers or catching "
-                         "Prestige Essence fish.");
-                 return;
-               }
-
                if (g_db->delete_single_fish(msg.author.id, qualifying_opt->id)) {
                  g_db->update_balances(msg.author.id, -req_coins, 0);
 
@@ -3501,6 +3479,29 @@ public:
              embed.set_description(desc);
              payload.add_embed(embed);
              bot.send_message(msg.channel_id, payload);
+             return;
+           }
+
+           //  9b. TOKENS
+           if (sub == "tokens") {
+             auto u_opt = g_db->get_fishing_user(msg.author.id);
+             if (!u_opt) {
+               bot.send_message(msg.channel_id,
+                                "Could not retrieve your Fishing Token balance.");
+               return;
+             }
+
+             bot.send_message(
+                 msg.channel_id,
+                 "🪙 **Prestige Tokens:** " +
+                     std::to_string(u_opt->prestige_tokens) +
+                     "\nSpend them on prestige rods with `" +
+                     bot.config().command_prefix +
+                     "fish shop prestige`, prestige bait on shop page 6, or "
+                     "rod enchants on page 7. Buy an item with `" +
+                     bot.config().command_prefix + "fish buy <item_id>`.\n"
+                     "Earn more by reaching Fishing Prestige tiers or catching "
+                     "Prestige Essence fish.");
              return;
            }
 

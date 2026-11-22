@@ -14,10 +14,28 @@
 
 namespace bronx::cogs {
 
+// Advance or rewind a byte index so it lands on a valid UTF-8 codepoint boundary
+inline size_t utf8_floor_boundary(const std::string &s, size_t idx) {
+  if (idx >= s.size()) return s.size();
+  while (idx > 0 && (static_cast<unsigned char>(s[idx]) & 0xC0) == 0x80) {
+    --idx;
+  }
+  return idx;
+}
+
+inline size_t utf8_ceil_boundary(const std::string &s, size_t idx) {
+  if (idx >= s.size()) return s.size();
+  while (idx < s.size() && (static_cast<unsigned char>(s[idx]) & 0xC0) == 0x80) {
+    ++idx;
+  }
+  return idx;
+}
+
 inline std::string truncate_str(const std::string &str, size_t max_len = 1900) {
   if (str.length() <= max_len)
     return str;
-  return str.substr(0, max_len - 3) + "...";
+  size_t cut = utf8_floor_boundary(str, max_len > 3 ? max_len - 3 : 0);
+  return str.substr(0, cut) + "...";
 }
 
 inline void format_edited_diff(const std::string &old_text,
@@ -45,20 +63,23 @@ inline void format_edited_diff(const std::string &old_text,
     suffix_len++;
   }
 
-  size_t start_idx = (prefix_len > context_padding) ? (prefix_len - context_padding) : 0;
+  size_t raw_start = (prefix_len > context_padding) ? (prefix_len - context_padding) : 0;
+  size_t old_start_idx = utf8_ceil_boundary(old_text, raw_start);
+  size_t new_start_idx = utf8_ceil_boundary(new_text, raw_start);
+
   size_t old_end_idx = old_text.size() - ((suffix_len > context_padding) ? (suffix_len - context_padding) : 0);
-  if (old_end_idx < start_idx) old_end_idx = old_text.size();
+  old_end_idx = utf8_floor_boundary(old_text, old_end_idx);
+  if (old_end_idx < old_start_idx) old_end_idx = old_text.size();
 
   size_t new_end_idx = new_text.size() - ((suffix_len > context_padding) ? (suffix_len - context_padding) : 0);
-  if (new_end_idx < start_idx) new_end_idx = new_text.size();
+  new_end_idx = utf8_floor_boundary(new_text, new_end_idx);
+  if (new_end_idx < new_start_idx) new_end_idx = new_text.size();
 
-  std::string old_snippet = old_text.substr(start_idx, old_end_idx - start_idx);
-  std::string new_snippet = new_text.substr(start_idx, new_end_idx - start_idx);
+  std::string old_snippet = old_text.substr(old_start_idx, old_end_idx - old_start_idx);
+  std::string new_snippet = new_text.substr(new_start_idx, new_end_idx - new_start_idx);
 
-  if (start_idx > 0) {
-    old_snippet = "..." + old_snippet;
-    new_snippet = "..." + new_snippet;
-  }
+  if (old_start_idx > 0) old_snippet = "..." + old_snippet;
+  if (new_start_idx > 0) new_snippet = "..." + new_snippet;
 
   if (old_end_idx < old_text.size()) {
     old_snippet += "...";
@@ -265,7 +286,7 @@ dispatch_log(stoatpp::cluster &bot, const std::string &server_id,
     if (emb.contains("description") && emb["description"].is_string()) {
       std::string desc = emb["description"].get<std::string>();
       if (desc.length() > 1900) {
-        emb["description"] = desc.substr(0, 1897) + "...";
+        emb["description"] = truncate_str(desc, 1900);
       }
     }
   }
@@ -277,7 +298,7 @@ dispatch_log(stoatpp::cluster &bot, const std::string &server_id,
   }
 
   if (payload.content.length() > 1900) {
-    payload.content = payload.content.substr(0, 1897) + "...";
+    payload.content = truncate_str(payload.content, 1900);
   }
 
   // Run the webhook resolution and execution logic in a separate thread so it
@@ -1469,7 +1490,7 @@ public:
                 // Show deleted content in a blockquote-style diff block
                 std::string flat;
                 for (char c : trunc_deleted) flat += (c == '\n') ? ' ' : c;
-                if (flat.size() > 1800) flat = flat.substr(0, 1797) + "...";
+                if (flat.size() > 1800) flat = truncate_str(flat, 1800);
                 desc += "```diff\n- " + flat + "\n```";
               }
             } else {
@@ -1556,8 +1577,8 @@ public:
 
           std::string b = flatten(trunc_old);
           std::string a = flatten(trunc_new);
-          if (b.size() > 860) b = b.substr(0, 857) + "...";
-          if (a.size() > 860) a = a.substr(0, 857) + "...";
+          if (b.size() > 860) b = truncate_str(b, 860);
+          if (a.size() > 860) a = truncate_str(a, 860);
 
           std::string desc;
           if (!author_id.empty()) {

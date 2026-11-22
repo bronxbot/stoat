@@ -732,7 +732,18 @@ public:
                         {"user_id",   user_id},
                         {"server_id", server_id}
                     };
-                    send_json(req);
+                    if (!send_json(req)) {
+                        std::function<void(bool, const nlohmann::json&)> cb;
+                        {
+                            std::lock_guard<std::mutex> lock(pending_sync_status_mutex_);
+                            auto it = pending_sync_status_.find(user_id);
+                            if (it != pending_sync_status_.end()) {
+                                cb = it->second;
+                                pending_sync_status_.erase(it);
+                            }
+                        }
+                        if (cb) cb(false, nlohmann::json::array());
+                    }
                     return;
                 }
 
@@ -1068,12 +1079,14 @@ private:
         return arr;
     }
 
-    void send_json(const nlohmann::json& j) {
+    bool send_json(const nlohmann::json& j) {
         std::lock_guard<std::mutex> lock(socket_mutex_);
         if (socket_fd_ != -1) {
             std::string data = j.dump() + "\n";
             send(socket_fd_, data.c_str(), data.size(), 0);
+            return true;
         }
+        return false;
     }
 
     void run_socket_loop() {
