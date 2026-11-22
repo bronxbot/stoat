@@ -674,10 +674,14 @@ public:
                             bot.send_message(msg.channel_id, "ℹ️ No backups found. Run `.backup create` to make one!");
                             return;
                         }
-                        std::string out = "💾 **Saved Backups**\n";
+                        auto clean_cell = [](std::string s) {
+                            for (char& c : s) if (c == '|' || c == '\n' || c == '\r') c = ' ';
+                            return s;
+                        };
+                        std::string out = "💾 **Saved Backups**\n\n| ID | Name | Platform | Type |\n| --- | --- | --- | --- |\n";
                         for (const auto& b : list) {
-                            out += "• `" + b.backup_id + "` — **" + b.name + "** (" + b.platform +
-                                   (b.is_auto ? ", auto" : "") + ")\n";
+                            out += "| `" + b.backup_id + "` | " + clean_cell(b.name) + " | " + b.platform +
+                                   " | " + (b.is_auto ? "auto" : "manual") + " |\n";
                         }
                         bot.send_message(msg.channel_id, out);
                     } else if (sub == "info" && args.size() >= 2) {
@@ -691,13 +695,16 @@ public:
                         size_t ccount = snap.contains("channels") ? snap["channels"].size() : 0;
                         size_t catcount = snap.contains("categories") ? snap["categories"].size() : 0;
                         size_t bcount = snap.contains("bans") ? snap["bans"].size() : 0;
-                        std::string out = "💾 **Backup Info: `" + b_opt->backup_id + "`**\n"
-                                          "• **Name:** " + b_opt->name + "\n"
-                                          "• **Origin Platform:** " + b_opt->platform + "\n"
-                                          "• **Roles:** " + std::to_string(rcount) + "\n"
-                                          "• **Categories:** " + std::to_string(catcount) + "\n"
-                                          "• **Channels:** " + std::to_string(ccount) + "\n"
-                                          "• **Bans:** " + std::to_string(bcount) + "\n";
+                        std::string bname = b_opt->name;
+                        for (char& c : bname) if (c == '|' || c == '\n' || c == '\r') c = ' ';
+                        std::string out = "💾 **Backup Info: `" + b_opt->backup_id + "`**\n\n"
+                                          "| Field | Value |\n| --- | --- |\n"
+                                          "| Name | " + bname + " |\n"
+                                          "| Platform | " + b_opt->platform + " |\n"
+                                          "| Roles | " + std::to_string(rcount) + " |\n"
+                                          "| Categories | " + std::to_string(catcount) + " |\n"
+                                          "| Channels | " + std::to_string(ccount) + " |\n"
+                                          "| Bans | " + std::to_string(bcount) + " |\n";
                         bot.send_message(msg.channel_id, out);
                     } else if (sub == "load" && args.size() >= 2) {
                         auto b_opt = bronx::g_db->get_server_backup(args[1]);
@@ -813,17 +820,19 @@ public:
                 auto builtins = get_builtin_presets();
 
                 if (sub == "list") {
-                    std::string out = "📋 **Built-in Server Presets**\n";
+                    auto clean_cell = [](std::string s) {
+                        for (char& c : s) if (c == '|' || c == '\n' || c == '\r') c = ' ';
+                        return s;
+                    };
+                    std::string out = "📋 **Server Presets**\n\n| Preset | Type | Description |\n| --- | --- | --- |\n";
                     for (const auto& [name, pair] : builtins) {
-                        out += "• `" + name + "` — " + pair.first + "\n";
+                        out += "| `" + name + "` | built-in | " + clean_cell(pair.first) + " |\n";
                     }
                     if (bronx::g_db) {
                         auto custom = bronx::g_db->list_server_presets();
-                        if (!custom.empty()) {
-                            out += "\n🌐 **Saved Presets**\n";
-                            for (const auto& p : custom) {
-                                out += "• `" + p.preset_name + "`" + (p.description.empty() ? "" : " — " + p.description) + "\n";
-                            }
+                        for (const auto& p : custom) {
+                            out += "| `" + clean_cell(p.preset_name) + "` | saved | " +
+                                   (p.description.empty() ? "-" : clean_cell(p.description)) + " |\n";
                         }
                     }
                     bot.send_message(msg.channel_id, out);
