@@ -8,6 +8,9 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#ifdef BRONX_CHART_ENABLED
+#include <cairo/cairo.h>
+#endif
 
 namespace bronx::chess {
 
@@ -85,6 +88,8 @@ public:
     std::vector<Piece> captured_by_black;
     std::vector<std::string> history_san;
     std::string last_move_san;
+    int last_from = -1;
+    int last_to = -1;
 
     ChessBoard() { reset(); }
 
@@ -108,6 +113,8 @@ public:
         captured_by_black.clear();
         history_san.clear();
         last_move_san.clear();
+        last_from = -1;
+        last_to = -1;
     }
 
     static int sq_index(int r, int c) { return r * 8 + c; }
@@ -368,6 +375,8 @@ public:
 
         if (!white_turn) fullmove++;
         white_turn = !white_turn;
+        last_from = m.from;
+        last_to = m.to;
     }
 
     std::vector<Move> generate_legal_moves() const {
@@ -728,6 +737,211 @@ public:
         for (Piece p : caps) out += piece_unicode(p);
         return out;
     }
+
+#ifdef BRONX_CHART_ENABLED
+    std::string render_board_png(bool flip = false) const {
+        constexpr int S = 70;
+        constexpr int SIZE = S * 8;
+        cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, SIZE, SIZE);
+        cairo_t* cr = cairo_create(surface);
+
+        int king_check_sq = in_check(white_turn) ? find_king(white_turn) : -1;
+
+        for (int step = 0; step < 8; ++step) {
+            int r = flip ? (7 - step) : step;
+            for (int cstep = 0; cstep < 8; ++cstep) {
+                int c = flip ? (7 - cstep) : cstep;
+                int idx = r * 8 + c;
+                bool light = ((r + c) % 2 == 0);
+
+                // Square base (Chess.com green/cream)
+                if (idx == last_from || idx == last_to) {
+                    if (light) cairo_set_source_rgb(cr, 0.965, 0.965, 0.412); // #f6f669
+                    else       cairo_set_source_rgb(cr, 0.729, 0.792, 0.267); // #baca44
+                } else {
+                    if (light) cairo_set_source_rgb(cr, 0.933, 0.933, 0.824); // #eeeed2
+                    else       cairo_set_source_rgb(cr, 0.463, 0.588, 0.337); // #769656
+                }
+                cairo_rectangle(cr, cstep * S, step * S, S, S);
+                cairo_fill(cr);
+
+                if (idx == king_check_sq) {
+                    cairo_set_source_rgba(cr, 0.90, 0.18, 0.18, 0.55);
+                    cairo_rectangle(cr, cstep * S, step * S, S, S);
+                    cairo_fill(cr);
+                }
+
+                // Rank & file labels
+                cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+                cairo_set_font_size(cr, 12.0);
+                if (light) cairo_set_source_rgb(cr, 0.463, 0.588, 0.337);
+                else       cairo_set_source_rgb(cr, 0.933, 0.933, 0.824);
+
+                if (cstep == 0) {
+                    std::string rk(1, static_cast<char>('8' - r));
+                    cairo_move_to(cr, cstep * S + 4, step * S + 15);
+                    cairo_show_text(cr, rk.c_str());
+                }
+                if (step == 7) {
+                    std::string fl(1, static_cast<char>('a' + c));
+                    cairo_move_to(cr, (cstep + 1) * S - 12, (step + 1) * S - 5);
+                    cairo_show_text(cr, fl.c_str());
+                }
+
+                // Piece drawing
+                Piece p = sq[idx];
+                if (p != EMPTY) {
+                    draw_piece(cr, cstep * S, step * S, S, p);
+                }
+            }
+        }
+
+        std::string png_bytes;
+        cairo_surface_write_to_png_stream(surface, [](void* closure, const unsigned char* data, unsigned int len) -> cairo_status_t {
+            auto* out = static_cast<std::string*>(closure);
+            out->append(reinterpret_cast<const char*>(data), len);
+            return CAIRO_STATUS_SUCCESS;
+        }, &png_bytes);
+        cairo_destroy(cr);
+        cairo_surface_destroy(surface);
+        return png_bytes;
+    }
+
+private:
+    static void draw_piece(cairo_t* cr, double x, double y, double s, Piece p) {
+        bool white = (p > 0);
+        int ap = piece_abs(p);
+
+        auto fill_and_stroke = [&]() {
+            if (white) {
+                cairo_set_source_rgb(cr, 0.98, 0.98, 0.98);
+                cairo_fill_preserve(cr);
+                cairo_set_source_rgb(cr, 0.16, 0.16, 0.16);
+                cairo_set_line_width(cr, 2.2);
+                cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+                cairo_stroke(cr);
+            } else {
+                cairo_set_source_rgb(cr, 0.20, 0.20, 0.21);
+                cairo_fill_preserve(cr);
+                cairo_set_source_rgb(cr, 0.10, 0.10, 0.10);
+                cairo_set_line_width(cr, 1.8);
+                cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+                cairo_stroke(cr);
+            }
+        };
+
+        auto px = [&](double u) { return x + u * s; };
+        auto py = [&](double v) { return y + v * s; };
+
+        if (ap == 1) { // Pawn
+            // Base
+            cairo_move_to(cr, px(0.26), py(0.84));
+            cairo_line_to(cr, px(0.74), py(0.84));
+            cairo_line_to(cr, px(0.68), py(0.74));
+            cairo_curve_to(cr, px(0.60), py(0.66), px(0.58), py(0.52), px(0.56), py(0.45));
+            cairo_line_to(cr, px(0.44), py(0.45));
+            cairo_curve_to(cr, px(0.42), py(0.52), px(0.40), py(0.66), px(0.32), py(0.74));
+            cairo_close_path(cr);
+            fill_and_stroke();
+            // Head
+            cairo_arc(cr, px(0.50), py(0.33), s * 0.135, 0, 2 * M_PI);
+            fill_and_stroke();
+        } else if (ap == 4) { // Rook
+            cairo_move_to(cr, px(0.24), py(0.84));
+            cairo_line_to(cr, px(0.76), py(0.84));
+            cairo_line_to(cr, px(0.72), py(0.74));
+            cairo_line_to(cr, px(0.65), py(0.70));
+            cairo_line_to(cr, px(0.65), py(0.38));
+            cairo_line_to(cr, px(0.73), py(0.32));
+            cairo_line_to(cr, px(0.73), py(0.18));
+            cairo_line_to(cr, px(0.63), py(0.18));
+            cairo_line_to(cr, px(0.63), py(0.25));
+            cairo_line_to(cr, px(0.55), py(0.25));
+            cairo_line_to(cr, px(0.55), py(0.18));
+            cairo_line_to(cr, px(0.45), py(0.18));
+            cairo_line_to(cr, px(0.45), py(0.25));
+            cairo_line_to(cr, px(0.37), py(0.25));
+            cairo_line_to(cr, px(0.37), py(0.18));
+            cairo_line_to(cr, px(0.27), py(0.18));
+            cairo_line_to(cr, px(0.27), py(0.32));
+            cairo_line_to(cr, px(0.35), py(0.38));
+            cairo_line_to(cr, px(0.35), py(0.70));
+            cairo_line_to(cr, px(0.28), py(0.74));
+            cairo_close_path(cr);
+            fill_and_stroke();
+        } else if (ap == 2) { // Knight
+            cairo_move_to(cr, px(0.26), py(0.84));
+            cairo_line_to(cr, px(0.74), py(0.84));
+            cairo_line_to(cr, px(0.72), py(0.72));
+            cairo_curve_to(cr, px(0.74), py(0.46), px(0.66), py(0.25), px(0.52), py(0.20));
+            cairo_line_to(cr, px(0.46), py(0.14));
+            cairo_line_to(cr, px(0.42), py(0.21));
+            cairo_line_to(cr, px(0.25), py(0.36));
+            cairo_line_to(cr, px(0.28), py(0.46));
+            cairo_line_to(cr, px(0.44), py(0.44));
+            cairo_curve_to(cr, px(0.42), py(0.55), px(0.34), py(0.64), px(0.28), py(0.72));
+            cairo_close_path(cr);
+            fill_and_stroke();
+            // Eye
+            cairo_arc(cr, px(0.40), py(0.31), s * 0.025, 0, 2 * M_PI);
+            if (white) cairo_set_source_rgb(cr, 0.16, 0.16, 0.16);
+            else       cairo_set_source_rgb(cr, 0.90, 0.90, 0.90);
+            cairo_fill(cr);
+        } else if (ap == 3) { // Bishop
+            cairo_move_to(cr, px(0.26), py(0.84));
+            cairo_line_to(cr, px(0.74), py(0.84));
+            cairo_line_to(cr, px(0.68), py(0.74));
+            cairo_curve_to(cr, px(0.64), py(0.56), px(0.66), py(0.34), px(0.50), py(0.22));
+            cairo_curve_to(cr, px(0.34), py(0.34), px(0.36), py(0.56), px(0.32), py(0.74));
+            cairo_close_path(cr);
+            fill_and_stroke();
+            cairo_arc(cr, px(0.50), py(0.17), s * 0.055, 0, 2 * M_PI);
+            fill_and_stroke();
+            // Diagonal slash
+            cairo_move_to(cr, px(0.45), py(0.36));
+            cairo_line_to(cr, px(0.56), py(0.47));
+            if (white) cairo_set_source_rgb(cr, 0.16, 0.16, 0.16);
+            else       cairo_set_source_rgb(cr, 0.90, 0.90, 0.90);
+            cairo_set_line_width(cr, 2.2);
+            cairo_stroke(cr);
+        } else if (ap == 5) { // Queen
+            cairo_move_to(cr, px(0.24), py(0.84));
+            cairo_line_to(cr, px(0.76), py(0.84));
+            cairo_line_to(cr, px(0.72), py(0.72));
+            cairo_line_to(cr, px(0.82), py(0.32));
+            cairo_line_to(cr, px(0.63), py(0.50));
+            cairo_line_to(cr, px(0.50), py(0.24));
+            cairo_line_to(cr, px(0.37), py(0.50));
+            cairo_line_to(cr, px(0.18), py(0.32));
+            cairo_line_to(cr, px(0.28), py(0.72));
+            cairo_close_path(cr);
+            fill_and_stroke();
+            for (auto [cx, cy] : std::array<std::pair<double,double>, 3>{{{0.18,0.28}, {0.50,0.20}, {0.82,0.28}}}) {
+                cairo_arc(cr, px(cx), py(cy), s * 0.045, 0, 2 * M_PI);
+                fill_and_stroke();
+            }
+        } else if (ap == 6) { // King
+            // Cross
+            cairo_move_to(cr, px(0.50), py(0.11));
+            cairo_line_to(cr, px(0.50), py(0.26));
+            cairo_move_to(cr, px(0.42), py(0.18));
+            cairo_line_to(cr, px(0.58), py(0.18));
+            cairo_set_source_rgb(cr, white ? 0.16 : 0.90, white ? 0.16 : 0.90, white ? 0.16 : 0.90);
+            cairo_set_line_width(cr, 3.0);
+            cairo_stroke(cr);
+            // Body
+            cairo_move_to(cr, px(0.25), py(0.84));
+            cairo_line_to(cr, px(0.75), py(0.84));
+            cairo_line_to(cr, px(0.70), py(0.72));
+            cairo_curve_to(cr, px(0.82), py(0.48), px(0.74), py(0.28), px(0.56), py(0.32));
+            cairo_line_to(cr, px(0.50), py(0.38));
+            cairo_line_to(cr, px(0.44), py(0.32));
+            cairo_curve_to(cr, px(0.26), py(0.28), px(0.18), py(0.48), px(0.30), py(0.72));
+            cairo_close_path(cr);
+            fill_and_stroke();
+        }
+    }
+#endif
 };
 
 } // namespace bronx::chess

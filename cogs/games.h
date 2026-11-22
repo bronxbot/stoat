@@ -2,6 +2,7 @@
 #include "stoatpp/bot_module.h"
 #include "helpers.h"
 #include "chess_engine.h"
+#include "chart_renderer.h"
 #include <vector>
 #include <string>
 #include <random>
@@ -1013,28 +1014,33 @@ public:
                     }
                     std::string status_text = "🏳️ <@" + msg.author.id + "> resigned! " +
                         (winner_id == "AI" ? "**Bronx AI** wins!" : "<@" + winner_id + "> wins!");
-                    auto payload = build_chess_payload(game, status_text, 0xE74C3C);
-                    update_chess_board_message(bot, msg.channel_id, msg.id, game.message_id, payload, true);
+                    update_chess_board_message(bot, msg.channel_id, msg.id, game.message_id, game, status_text, 0xE74C3C, true);
                     return;
                 }
 
                 if (low == "board") {
-                    std::lock_guard<std::mutex> lock(chess_mutex_);
-                    auto it = active_chess_games_.find(msg.channel_id);
-                    if (it == active_chess_games_.end()) {
-                        bot.send_message(msg.channel_id, bronx::emj_no + " No active chess game in this channel.");
-                        return;
-                    }
-                    auto payload = build_chess_payload(it->second, "", 0x3498DB);
-                    std::string old_id = it->second.message_id;
-                    bot.send_message(msg.channel_id, payload, [this, &bot, cid = msg.channel_id, old_id](stoatpp::models::Message m, bool ok) {
-                        if (ok && !m.id.empty()) {
-                            if (!old_id.empty()) bot.delete_message(cid, old_id);
-                            std::lock_guard<std::mutex> lock(chess_mutex_);
-                            auto it2 = active_chess_games_.find(cid);
-                            if (it2 != active_chess_games_.end()) it2->second.message_id = m.id;
+                    ChessGame game_copy;
+                    {
+                        std::lock_guard<std::mutex> lock(chess_mutex_);
+                        auto it = active_chess_games_.find(msg.channel_id);
+                        if (it == active_chess_games_.end()) {
+                            bot.send_message(msg.channel_id, bronx::emj_no + " No active chess game in this channel.");
+                            return;
                         }
-                    });
+                        game_copy = it->second;
+                    }
+                    std::thread([this, &bot, cid = msg.channel_id, game_copy]() {
+                        auto payload = build_chess_payload(bot, game_copy, "", 0x3498DB);
+                        std::string old_id = game_copy.message_id;
+                        bot.send_message(cid, payload, [this, &bot, cid, old_id](stoatpp::models::Message m, bool ok) {
+                            if (ok && !m.id.empty()) {
+                                if (!old_id.empty()) bot.delete_message(cid, old_id);
+                                std::lock_guard<std::mutex> lock(chess_mutex_);
+                                auto it2 = active_chess_games_.find(cid);
+                                if (it2 != active_chess_games_.end()) it2->second.message_id = m.id;
+                            }
+                        });
+                    }).detach();
                     return;
                 }
 
@@ -1783,6 +1789,7 @@ public:
     // ---- Chess helpers ----
 
     stoatpp::models::MessagePayload build_chess_payload(
+        stoatpp::cluster& bot,
         const ChessGame& game,
         const std::string& status_override = "",
         uint32_t colour = 0x3498DB) const
@@ -1801,7 +1808,19 @@ public:
         std::string black_tag = game.vs_ai ? "**Bronx AI**" : "<@" + game.black_id + ">";
 
         std::string desc = "⬜ **White:** " + white_tag + "  |  ⬛ **Black:** " + black_tag + "\n";
-        desc += game.board.render_board(false) + "\n";
+
+        std::string att_id;
+#ifdef BRONX_CHART_ENABLED
+        std::string png = game.board.render_board_png(false);
+        if (!png.empty()) {
+            att_id = chart::upload_chart(bot, png, "chess.png");
+        }
+#endif
+        if (!att_id.empty()) {
+            payload.add_attachment(att_id);
+        } else {
+            desc += game.board.render_board(false) + "\n";
+        }
 
         if (!game.board.last_move_san.empty()) {
             desc += "**Last move:** `" + game.board.last_move_san + "`\n";
@@ -1848,47 +1867,54 @@ public:
             active_chess_games_[channel_id] = game;
         }
 
-        auto payload = build_chess_payload(game);
-        bot.send_message(channel_id, payload, [this, &bot, channel_id](stoatpp::models::Message res, bool ok) {
-            std::lock_guard<std::mutex> lock(chess_mutex_);
-            if (!ok || res.id.empty()) {
-                active_chess_games_.erase(channel_id);
-                return;
-            }
-            auto it = active_chess_games_.find(channel_id);
-            if (it != active_chess_games_.end()) {
-                it->second.message_id = res.id;
-            }
-        });
+        std::thread([this, &bot, channel_id, game]() {
+            auto payload = build_chess_payload(bot, game);
+            bot.send_message(channel_id, payload, [this, channel_id](stoatpp::models::Message res, bool ok) {
+                std::lock_guard<std::mutex> lock(chess_mutex_);
+                if (!ok || res.id.empty()) {
+                    active_chess_games_.erase(channel_id);
+                    return;
+                }
+                auto it = active_chess_games_.find(channel_id);
+                if (it != active_chess_games_.end()) {
+                    it->second.message_id = res.id;
+                }
+            });
+        }).detach();
     }
 
     void update_chess_board_message(stoatpp::cluster& bot,
                                     const std::string& channel_id,
                                     const std::string& user_msg_id,
                                     const std::string& old_board_id,
-                                    const stoatpp::models::MessagePayload& payload,
+                                    const ChessGame& game,
+                                    const std::string& status_override,
+                                    uint32_t colour,
                                     bool finished)
     {
-        bot.delete_message(channel_id, user_msg_id, [this, &bot, channel_id, old_board_id, payload, finished](bool deleted_user) {
-            if (deleted_user && !old_board_id.empty()) {
-                bot.edit_message(channel_id, old_board_id, payload);
-            } else {
-                bot.send_message(channel_id, payload, [this, &bot, channel_id, old_board_id, finished](stoatpp::models::Message new_msg, bool ok) {
-                    if (ok && !new_msg.id.empty()) {
-                        if (!old_board_id.empty()) {
-                            bot.delete_message(channel_id, old_board_id);
-                        }
-                        if (!finished) {
-                            std::lock_guard<std::mutex> lock(chess_mutex_);
-                            auto it = active_chess_games_.find(channel_id);
-                            if (it != active_chess_games_.end()) {
-                                it->second.message_id = new_msg.id;
+        std::thread([this, &bot, channel_id, user_msg_id, old_board_id, game, status_override, colour, finished]() {
+            auto payload = build_chess_payload(bot, game, status_override, colour);
+            bot.delete_message(channel_id, user_msg_id, [this, &bot, channel_id, old_board_id, payload, finished](bool deleted_user) {
+                if (deleted_user && !old_board_id.empty()) {
+                    bot.edit_message(channel_id, old_board_id, payload);
+                } else {
+                    bot.send_message(channel_id, payload, [this, &bot, channel_id, old_board_id, finished](stoatpp::models::Message new_msg, bool ok) {
+                        if (ok && !new_msg.id.empty()) {
+                            if (!old_board_id.empty()) {
+                                bot.delete_message(channel_id, old_board_id);
+                            }
+                            if (!finished) {
+                                std::lock_guard<std::mutex> lock(chess_mutex_);
+                                auto it = active_chess_games_.find(channel_id);
+                                if (it != active_chess_games_.end()) {
+                                    it->second.message_id = new_msg.id;
+                                }
                             }
                         }
-                    }
-                });
-            }
-        });
+                    });
+                }
+            });
+        }).detach();
     }
 
     bool handle_chess_message(stoatpp::cluster& bot, const stoatpp::events::Message& msg) {
@@ -2004,8 +2030,7 @@ public:
             }
         }
 
-        auto payload = build_chess_payload(game_copy, status_override, colour);
-        update_chess_board_message(bot, msg.channel_id, msg.id, old_board_id, payload, finished);
+        update_chess_board_message(bot, msg.channel_id, msg.id, old_board_id, game_copy, status_override, colour, finished);
         return true;
     }
 };
