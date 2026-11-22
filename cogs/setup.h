@@ -156,15 +156,37 @@ public:
         // --- EVENT: on_message_react (check introduction reaction buttons) ---
         bot.on_message_react([&bot](const stoatpp::events::MessageReact& e) {
             if (e.user_id == bot.current_user().id) return;
-            if (e.emoji_id != "🛠️" && e.emoji_id != "🛠" && e.emoji_id != "📖") return;
+            const bool is_setup_emoji = (e.emoji_id == "🛠️" || e.emoji_id == "🛠" || e.emoji_id == "01KWKZKNMTBYXG0GRSEDKP7B2X");
+            const bool is_help_emoji = (e.emoji_id == "📖");
+            if (!is_setup_emoji && !is_help_emoji) return;
 
             // Retrieve message to check if it's the welcome message
-            std::thread([&bot, e]() {
+            std::thread([&bot, e, is_setup_emoji, is_help_emoji]() {
+                try {
                 auto res = bot.rest().get_message(e.channel_id, e.id);
-                if (!res.success()) return;
+                if (!res.success() || !res.body.is_object()) return;
 
-                std::string content = res.body.value("content", "");
-                if (content.rfind("👋 **Hello, I am Bronx!**", 0) != 0) return;
+                if (res.body.contains("author") && res.body["author"].is_string() &&
+                    res.body["author"].get<std::string>() != bot.current_user().id) {
+                    return;
+                }
+
+                bool is_welcome = false;
+                if (res.body.contains("content") && res.body["content"].is_string()) {
+                    if (res.body["content"].get<std::string>().rfind("👋 **Hello, I am Bronx!**", 0) == 0) {
+                        is_welcome = true;
+                    }
+                }
+                if (!is_welcome && res.body.contains("embeds") && res.body["embeds"].is_array() && !res.body["embeds"].empty()) {
+                    const auto& first_embed = res.body["embeds"][0];
+                    if (first_embed.is_object() && first_embed.contains("title") && first_embed["title"].is_string()) {
+                        std::string title = first_embed["title"].get<std::string>();
+                        if (title == "hello, I am bronx!" || title == "👋 **Hello, I am Bronx!**") {
+                            is_welcome = true;
+                        }
+                    }
+                }
+                if (!is_welcome) return;
 
                 // Resolve server ID
                 std::string server_id = "";
@@ -180,7 +202,7 @@ public:
                 if (server_id.empty()) return;
 
                 // Verify permissions of the user adding reaction
-                bot.fetch_member(server_id, e.user_id, [&bot, e, server_id](stoatpp::models::Member member, bool ok) {
+                bot.fetch_member(server_id, e.user_id, [&bot, e, server_id, is_setup_emoji, is_help_emoji](stoatpp::models::Member member, bool ok) {
                     if (!ok) return;
 
                     bool can_setup = bot.is_owner(e.user_id) || bot.is_server_owner(server_id, e.user_id);
@@ -203,9 +225,9 @@ public:
                     // Remove their reaction to keep it clean
                     bot.unreact_from_message(e.channel_id, e.id, e.emoji_id, e.user_id);
 
-                    if (e.emoji_id == "🛠️" || e.emoji_id == "🛠") {
+                    if (is_setup_emoji) {
                         execute_server_setup(bot, server_id, e.channel_id, e.user_id);
-                    } else if (e.emoji_id == "📖") {
+                    } else if (is_help_emoji) {
                         // Print help link / info
                         stoatpp::models::MessagePayload help_payload;
                         nlohmann::json help_embed = nlohmann::json::object();
@@ -224,6 +246,9 @@ public:
                         bot.send_message(e.channel_id, help_payload);
                     }
                 });
+                } catch (const std::exception& ex) {
+                    std::cerr << "[bronx setup error] on_message_react: " << ex.what() << "\n";
+                }
             }).detach();
         });
     }
