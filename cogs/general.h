@@ -607,10 +607,10 @@ public:
          "General"});
 
     bot.register_command(
-        {"dice",
-         {"roll"},
-         "roll one or more dice (e.g. .dice 6 or .dice 4d6 2d10).",
-         "dice [dice_expression...]",
+        {"roll",
+         {"diceroll", "d20"},
+         "roll one or more dice (e.g. .roll 6 or .roll 4d6 2d10).",
+         "roll [dice_expression...]",
          {"[dice_expression...]"},
          [](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
             const std::vector<std::string> &args) {

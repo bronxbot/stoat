@@ -1815,10 +1815,10 @@ public:
          },
          "Economy"});
 
-    // Standalone .pets command alias
+    // Standalone .fishpets command alias
     bot.register_command(
-        {"pets",
-         {"fishpets", "pet"},
+        {"fishpets",
+         {"fpet", "fpets"},
          "shortcut for `.fish pets`: view and equip your fishing companions.",
          "pets [equip/unequip] [pet_id]",
          {"[action]", "[pet_id]"},

@@ -776,7 +776,7 @@ public:
         // ── 3. .dice <bet> [target] ──────────────────────────────────────────
         bot.register_command({
             "dice",
-            {"roll", "craps"},
+            {"craps", "betdice"},
             "roll two dice and bet on combinations or sums.",
             "<bet> [high|low|7|doubles|2-12]",
             {"<bet>", "[target]"},
