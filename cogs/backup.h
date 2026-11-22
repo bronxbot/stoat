@@ -53,7 +53,7 @@ public:
     }
 
     // Portable Xenon-style server snapshot
-    static nlohmann::json snapshot_server_json(stoatpp::cluster& bot, const std::string& server_id) {
+    static nlohmann::json snapshot_server_json(stoatpp::cluster& bot, const std::string& server_id, bool include_bans = true) {
         nlohmann::json snap;
         auto srv_opt = bot.get_server(server_id);
         if (!srv_opt) {
@@ -149,17 +149,19 @@ public:
 
         // Bans
         nlohmann::json bans_arr = nlohmann::json::array();
-        auto bans_res = bot.rest().get_server_bans(server_id);
-        if (bans_res.success() && bans_res.body.is_object() && bans_res.body.contains("bans") && bans_res.body["bans"].is_array()) {
-            for (const auto& b : bans_res.body["bans"]) {
-                nlohmann::json bj;
-                if (b.contains("_id") && b["_id"].is_object()) {
-                    bj["user_id"] = b["_id"].value("user", "");
-                } else if (b.contains("user_id")) {
-                    bj["user_id"] = b.value("user_id", "");
+        if (include_bans) {
+            auto bans_res = bot.rest().get_server_bans(server_id);
+            if (bans_res.success() && bans_res.body.is_object() && bans_res.body.contains("bans") && bans_res.body["bans"].is_array()) {
+                for (const auto& b : bans_res.body["bans"]) {
+                    nlohmann::json bj;
+                    if (b.contains("_id") && b["_id"].is_object()) {
+                        bj["user_id"] = b["_id"].value("user", "");
+                    } else if (b.contains("user_id")) {
+                        bj["user_id"] = b.value("user_id", "");
+                    }
+                    bj["reason"] = b.value("reason", "");
+                    if (!bj["user_id"].get<std::string>().empty()) bans_arr.push_back(bj);
                 }
-                bj["reason"] = b.value("reason", "");
-                if (!bj["user_id"].get<std::string>().empty()) bans_arr.push_back(bj);
             }
         }
         snap["bans"] = bans_arr;
@@ -207,10 +209,12 @@ public:
                                          const nlohmann::json& snap,
                                          bool clear_existing,
                                          const std::string& keep_channel_id = "",
-                                         std::shared_ptr<std::atomic<bool>> cancel_flag = nullptr) {
+                                         std::shared_ptr<std::atomic<bool>> cancel_flag = nullptr,
+                                         bool include_bans = true) {
         int roles_created = 0;
         int channels_created = 0;
         int categories_set = 0;
+        int bans_applied = 0;
 
         auto cancelled = [&]() -> bool {
             return cancel_flag && cancel_flag->load();
@@ -402,9 +406,26 @@ public:
             }
         }
 
+        // 5. Apply bans (unless disabled via nobans)
+        if (include_bans && snap.contains("bans") && snap["bans"].is_array()) {
+            for (const auto& bj : snap["bans"]) {
+                if (cancelled()) return stopped_msg();
+                if (!bj.is_object()) continue;
+                std::string uid = bj.value("user_id", "");
+                if (uid.empty()) continue;
+                std::string reason = bj.value("reason", "");
+                std::optional<std::string> opt_reason = reason.empty() ? std::nullopt : std::optional<std::string>(reason);
+                auto bres = bot.rest().ban_user(server_id, uid, opt_reason);
+                if (bres.status_code == 403) return perm_abort_msg("applying bans");
+                if (bres.success()) bans_applied++;
+            }
+        }
+
         std::ostringstream ss;
         ss << "✅ **Restore complete!** Created **" << roles_created << "** roles, **"
-           << channels_created << "** channels, and organized **" << categories_set << "** categories.";
+           << channels_created << "** channels, and organized **" << categories_set << "** categories";
+        if (bans_applied > 0) ss << " (applied **" << bans_applied << "** bans)";
+        ss << ".";
         return ss.str();
     }
 
@@ -582,10 +603,10 @@ public:
                 if (args.empty()) {
                     bot.send_message(msg.channel_id,
                         "💾 **Server Backup Commands (Xenon-style)**\n"
-                        "• `.backup create [name]` - Save a full snapshot of roles, categories, channels, permissions & bans\n"
+                        "• `.backup create [name] [nobans]` - Save a full snapshot of roles, categories, channels, permissions & bans\n"
                         "• `.backup list` - List saved backups for this server & your account\n"
                         "• `.backup info <id>` - Preview a backup's contents\n"
-                        "• `.backup load <id> [clear]` - Restore a backup onto this server (cross-platform!)\n"
+                        "• `.backup load <id> [clear] [nobans]` - Restore a backup onto this server (cross-platform!)\n"
                         "• `.backup stop` - Stop an active backup or preset restore in this server\n"
                         "• `.backup delete <id>` - Delete a backup\n"
                         "• `.backup auto [on|off|<hours>]` - Configure automatic scheduled backups");
@@ -602,17 +623,22 @@ public:
                     }
 
                     if (sub == "create") {
-                        std::string name = "Server Backup";
-                        if (args.size() > 1) {
-                            name.clear();
-                            for (size_t i = 1; i < args.size(); ++i) {
-                                if (i > 1) name += " ";
-                                name += args[i];
+                        bool include_bans = true;
+                        std::string name;
+                        for (size_t i = 1; i < args.size(); ++i) {
+                            std::string low_arg = args[i];
+                            std::transform(low_arg.begin(), low_arg.end(), low_arg.begin(), ::tolower);
+                            if (low_arg == "nobans" || low_arg == "--nobans" || low_arg == "no-bans") {
+                                include_bans = false;
+                                continue;
                             }
+                            if (!name.empty()) name += " ";
+                            name += args[i];
                         }
-                        bot.send_message(msg.channel_id, "💾 Creating server backup...");
-                        std::thread([&bot, msg, name]() {
-                            nlohmann::json snap = snapshot_server_json(bot, msg.server_id);
+                        if (name.empty()) name = "Server Backup";
+                        bot.send_message(msg.channel_id, std::string("💾 Creating server backup") + (include_bans ? "..." : " (excluding bans)..."));
+                        std::thread([&bot, msg, name, include_bans]() {
+                            nlohmann::json snap = snapshot_server_json(bot, msg.server_id, include_bans);
                             if (!snap.is_object() || snap.empty()) {
                                 bot.send_message(msg.channel_id, bronx::emj_no + " Failed to snapshot server.");
                                 return;
@@ -679,7 +705,14 @@ public:
                             bot.send_message(msg.channel_id, bronx::emj_no + " Backup `" + args[1] + "` not found.");
                             return;
                         }
-                        bool clear_existing = (args.size() >= 3 && (args[2] == "clear" || args[2] == "--clear"));
+                        bool clear_existing = false;
+                        bool include_bans = true;
+                        for (size_t i = 2; i < args.size(); ++i) {
+                            std::string low_arg = args[i];
+                            std::transform(low_arg.begin(), low_arg.end(), low_arg.begin(), ::tolower);
+                            if (low_arg == "clear" || low_arg == "--clear") clear_existing = true;
+                            else if (low_arg == "nobans" || low_arg == "--nobans" || low_arg == "no-bans") include_bans = false;
+                        }
                         nlohmann::json snap = nlohmann::json::parse(b_opt->data_json, nullptr, false);
                         if (!snap.is_object()) {
                             bot.send_message(msg.channel_id, bronx::emj_no + " Backup data is corrupted.");
@@ -691,10 +724,11 @@ public:
                             return;
                         }
                         bot.send_message(msg.channel_id, "⏳ Loading backup `" + b_opt->backup_id + "`" +
-                            (clear_existing ? " (clearing existing channels & roles)..." : " (merging into server)...") +
+                            (clear_existing ? " (clearing existing channels & roles" : " (merging into server") +
+                            (include_bans ? ")..." : ", skipping bans)...") +
                             " Use `.backup stop` to cancel.");
-                        std::thread([&bot, msg, snap, clear_existing, cancel_flag]() {
-                            std::string res = apply_server_json(bot, msg.server_id, snap, clear_existing, msg.channel_id, cancel_flag);
+                        std::thread([&bot, msg, snap, clear_existing, cancel_flag, include_bans]() {
+                            std::string res = apply_server_json(bot, msg.server_id, snap, clear_existing, msg.channel_id, cancel_flag, include_bans);
                             end_restore(msg.server_id, cancel_flag);
                             bot.send_message(msg.channel_id, res);
                         }).detach();
