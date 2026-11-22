@@ -27,6 +27,7 @@ struct RodDef {
   int base_cd = 30; // seconds
   std::string passive_effect;
   std::string desc;
+  std::string event_tag = "";
 };
 
 struct BaitDef {
@@ -40,6 +41,7 @@ struct BaitDef {
   int cd_delta = 0;
   double rarity_boost = 1.0;
   std::string desc;
+  std::string event_tag = "";
 };
 
 struct RodEffectDef {
@@ -66,13 +68,14 @@ struct FishDef {
   double base_odds;        // probability e.g. 0.50, 0.25, 0.12...
   std::string effect_type; // "none", "gold_burst", "adrenaline",
                            // "luck_blessing", "prestige_token", "xp_surge"
+  std::string event_tag = "";
 };
 
 class FishingModule : public stoatpp::bot_module {
 public:
   struct ShopSession {
     int current_page = 0;
-    int max_pages = 7;
+    int max_pages = 8;
     std::string user_id;
     std::string prefix = ".";
   };
@@ -157,7 +160,13 @@ private:
          "Wields the primordial threads of reality."},
         {"multivertic_god_rod", "Multivertic Omnipotent Rod", 0, 1000, 6, 500.0,
          1, "Multivertic Dominance (5x Multivertic Odds & 5x Value)",
-         "Supreme rod transcending all multivertic dimensions."}};
+         "Supreme rod transcending all multivertic dimensions."},
+
+        // Event Rods
+        {"candy_cane_rod", "Candy Cane Event Rod", 5000, 0, 0, 2.5, 12,
+         "Christmas Event Only (requires Christmas Bait)",
+         "Festive peppermint rod for catching limited-edition Christmas fish.",
+         "christmas"}};
 
     // 2. Baits Catalog
     baits_ = {
@@ -195,7 +204,15 @@ private:
         {"singularity_core", "Singularity Core Bait", 5, 0, 80, 5, 100.00, -15,
          100.0, "Pure concentrated singularity (+10,000% Luck)."},
         {"multivertic_spark", "Multivertic Essence Spark", 5, 0, 200, 6, 250.00,
-         -20, 250.0, "Fragment of multivertic creation (+25,000% Luck)."}};
+         -20, 250.0, "Fragment of multivertic creation (+25,000% Luck)."},
+
+        // Event Baits (Tradable via .fish gift bait)
+        {"peppermint_crumb", "Peppermint Crumbs", 10, 500, 0, 0, 0.50, -1, 1.5,
+         "Christmas Event Bait (+50% Luck, 1.5x Rarity). Only works with Candy Cane Event Rod!",
+         "christmas"},
+        {"north_pole_lure", "North Pole Star Lure", 5, 2500, 0, 0, 2.00, -3, 4.0,
+         "Rare Christmas Event Bait (+200% Luck, 4x Rarity). Only works with Candy Cane Event Rod!",
+         "christmas"}};
 
     // 3. Rod Effects Catalog
     rod_effects_ = {
@@ -294,7 +311,20 @@ private:
          "prestige_token"},
         {"multivertic_architect", "Multivertic Cosmic Architect", "Multivertic",
          500000.0, 5000000.0, 15000000000LL, 50000000000LL, 0.00000002,
-         "prestige_token"}};
+         "prestige_token"},
+
+        // Christmas Event Fish (only catchable with Candy Cane Event Rod + Christmas Bait)
+        {"snowflake_minnow", "Snowflake Minnow", "Common", 0.3, 1.4, 250, 500, 0.45, "none", "christmas"},
+        {"peppermint_perch", "Peppermint Perch", "Common", 0.8, 2.8, 350, 700, 0.40, "none", "christmas"},
+        {"tinsel_trout", "Tinsel Trout", "Uncommon", 1.8, 6.0, 800, 1600, 0.25, "none", "christmas"},
+        {"gingerbread_guppy", "Gingerbread Guppy", "Uncommon", 0.5, 2.0, 950, 1900, 0.22, "gold_burst", "christmas"},
+        {"holly_halibut", "Holly Halibut", "Rare", 6.0, 18.0, 2500, 5200, 0.12, "none", "christmas"},
+        {"eggnog_eel", "Eggnog Eel", "Rare", 4.5, 14.0, 3200, 6500, 0.10, "xp_surge", "christmas"},
+        {"aurora_salmon", "Aurora Salmon", "Epic", 12.0, 35.0, 8500, 16000, 0.045, "luck_blessing", "christmas"},
+        {"reindeer_ray", "Reindeer Ray", "Epic", 18.0, 50.0, 12000, 22000, 0.035, "gold_burst", "christmas"},
+        {"santas_golden_koi", "Santa's Golden Koi", "Mythic", 30.0, 85.0, 45000, 90000, 0.012, "gold_burst", "christmas"},
+        {"krampus_leviathan", "Krampus Leviathan", "Mythic", 65.0, 180.0, 80000, 160000, 0.008, "adrenaline", "christmas"},
+        {"north_star_narwhal", "North Star Narwhal", "Mythic", 100.0, 260.0, 140000, 280000, 0.005, "prestige_token", "christmas"}};
 
     if (g_db) {
         auto custom_rods = g_db->get_custom_rods();
@@ -374,6 +404,13 @@ public:
                              const bronx::Database::FishingUser &u,
                              double total_luck,
                              double pet_rarity_boost) const {
+    if (rod->event_tag != bait->event_tag) {
+      return 0.0;
+    }
+    if (fish.event_tag != rod->event_tag) {
+      return 0.0;
+    }
+
     int tier = get_rarity_precedence(fish.rarity);
     if (tier < 0) tier = 0;
 
@@ -1217,13 +1254,15 @@ public:
 
     std::string footer_nav =
         "\n\n*Page " + std::to_string(page_idx + 1) +
-        " of 7 | React ◀ ▶ to navigate or type `" + prefix +
-        "shop fishing <1-7/category>`*";
+        " of 8 | React ◀ ▶ to navigate or type `" + prefix +
+        "shop fishing <1-8/category>`*";
 
-    // Separate standard baits into 2 groups
+    // Separate standard baits into 2 groups (excluding event baits)
     std::vector<BaitDef> std_baits;
     std::vector<BaitDef> prest_baits;
     for (const auto &b : baits_) {
+      if (!b.event_tag.empty())
+        continue;
       if (b.req_prestige > 0)
         prest_baits.push_back(b);
       else
@@ -1360,6 +1399,31 @@ public:
               "Multiplier/lvl)\n";
       desc += footer_nav;
       embed.set_description(desc);
+    } else if (page_idx == 7) {
+      embed.set_colour(0xE74C3C);
+      embed.set_title("🎄 Bronx Shop — ❄️ Event Gear (Christmas)");
+      std::string desc = "Event rods only work with matching event bait! "
+                         "Buy with `" + prefix + "fish buy <id> [qty]` & trade bait with `" +
+                         prefix + "fish gift <@user> bait <id> <qty>`:\n\n";
+      desc += "**Event Rods:**\n";
+      for (const auto &r : rods_) {
+        if (r.event_tag.empty())
+          continue;
+        desc += "`" + r.id + "` - **" + r.name + "** (" + std::to_string(r.cost) + " coins)\n"
+                "   Luck: **" + format_mult(r.luck_mult) + "x** | CD: **" +
+                std::to_string(r.base_cd) + "s** | *" + r.desc + "*\n";
+      }
+      desc += "\n**Event Baits (Tradable!):**\n";
+      for (const auto &b : baits_) {
+        if (b.event_tag.empty())
+          continue;
+        desc += "`" + b.id + "` - **" + b.name + "** (" + std::to_string(b.cost) +
+                " coins / pack of " + std::to_string(b.pack_size) + ")\n"
+                "   Luck: **+" + std::to_string(static_cast<int>(b.luck_bonus * 100)) +
+                "%** | CD: **" + std::to_string(b.cd_delta) + "s** | *" + b.desc + "*\n";
+      }
+      desc += footer_nav;
+      embed.set_description(desc);
     }
 
     payload.add_embed(embed);
@@ -1379,7 +1443,7 @@ public:
     if (!lower_arg.empty()) {
       try {
         int p = std::stoi(lower_arg);
-        if (p >= 1 && p <= 7)
+        if (p >= 1 && p <= 8)
           start_page = p - 1;
       } catch (...) {
         if (lower_arg == "rod" || lower_arg == "rods")
@@ -1395,6 +1459,9 @@ public:
                  lower_arg == "enchant" || lower_arg == "enchants" ||
                  lower_arg == "upgrade" || lower_arg == "upgrades")
           start_page = 6;
+        else if (lower_arg == "event" || lower_arg == "events" ||
+                 lower_arg == "christmas" || lower_arg == "xmas")
+          start_page = 7;
       }
     }
 
@@ -1405,7 +1472,7 @@ public:
                                                            bool success) {
                        if (success) {
                          std::lock_guard<std::mutex> lock(shop_mutex_);
-                         shop_sessions_[res.id] = {start_page, 7, author_id, prefix};
+                         shop_sessions_[res.id] = {start_page, 8, author_id, prefix};
                        }
                      });
   }
@@ -2630,33 +2697,50 @@ public:
 
              // Check active bait quantity
              int bait_qty = g_db->get_bait_count(msg.author.id, u.bait_id);
-             if (bait_qty <= 0) {
-               // Auto-fallback: check if the user has any other baits in their bag
+             if (bait_qty <= 0 || bait->event_tag != rod->event_tag) {
+               // Auto-fallback: check if the user has a compatible bait in their bag
                auto owned_baits = g_db->get_user_baits(msg.author.id);
                std::string fallback_id;
                int fallback_qty = 0;
                for (const auto &b : owned_baits) {
                  if (b.quantity > 0 && b.bait_id != u.bait_id) {
-                   fallback_id = b.bait_id;
-                   fallback_qty = b.quantity;
-                   break;
+                   const BaitDef *cand = get_bait(b.bait_id);
+                   if (cand && cand->event_tag == rod->event_tag) {
+                     fallback_id = b.bait_id;
+                     fallback_qty = b.quantity;
+                     break;
+                   }
                  }
                }
 
-               if (!fallback_id.empty()) {
+               if (!fallback_id.empty() && bait_qty <= 0) {
                  u.bait_id = fallback_id;
                  g_db->update_fishing_user(u);
                  bait = get_bait(fallback_id);
                  bot.send_message(msg.channel_id,
                                   "🪱 Ran out of previous bait! Auto-equipped **" +
                                       bait->name + "** (" + std::to_string(fallback_qty) + " left).");
-               } else {
+               } else if (bait_qty <= 0) {
                  std::string p = msg.prefix.empty() ? "." : msg.prefix;
                  bot.send_message(msg.channel_id,
                                   "" + bronx::emj_no + " You have run out of bait (**" +
-                                      bait->name + "**)! Buy more with `" + p + "buy worm 10` or check `" + p + "shop bait`.");
+                                      bait->name + "**)! Buy more with `" + p + "buy " + bait->id + " 10` or check `" + p + "shop fishing`.");
                  return;
                }
+             }
+
+             if (rod->event_tag != bait->event_tag) {
+               std::string p = msg.prefix.empty() ? "." : msg.prefix;
+               if (!rod->event_tag.empty()) {
+                 bot.send_message(msg.channel_id,
+                                  "🎄 **" + rod->name + "** only works with **" + rod->event_tag +
+                                  "** event bait! Equip event bait with `" + p + "fish bait <id>` or switch rods with `" + p + "fish equip <rod>`.");
+               } else {
+                 bot.send_message(msg.channel_id,
+                                  "🎄 **" + bait->name + "** is a **" + bait->event_tag +
+                                  "** event bait and only works with the matching event rod! Equip it with `" + p + "fish equip candy_cane_rod` or switch bait with `" + p + "fish bait <id>`.");
+               }
+               return;
              }
 
              // Calculate effective cooldown
