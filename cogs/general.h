@@ -940,7 +940,10 @@ public:
              embed.colour = "#5865F2";
 
              std::string desc = content.empty() ? "*(no text content)*" : content;
-             desc += "\n\n— [Jump to Message](https://app.stoat.chat/channel/" + target_channel + "/" + target_msg_id + ") in <#" + target_channel + ">";
+             std::string jump_url = msg.server_id.empty()
+                 ? ("https://stoat.chat/channel/" + target_channel + "/" + target_msg_id)
+                 : ("https://stoat.chat/server/" + msg.server_id + "/channel/" + target_channel + "/" + target_msg_id);
+             desc += "\n\n— [Jump to Message](" + jump_url + ") in <#" + target_channel + ">";
              embed.description = desc;
 
              // Check attachments

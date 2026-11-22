@@ -1476,7 +1476,7 @@ public:
               {"username", username},
               {"channel", "<#" + e.channel_id + ">"},
               {"content", trunc_deleted},
-              {"jump_url", "https://app.stoat.chat/channel/" + e.channel_id + "/" + e.id}};
+              {"jump_url", "https://stoat.chat/server/" + server_id + "/channel/" + e.channel_id + "/" + e.id}};
 
           auto default_fallback = [e, author_id, username, trunc_deleted]() {
             nlohmann::json embed = nlohmann::json::object();
@@ -1562,7 +1562,7 @@ public:
             {"channel", "<#" + e.channel_id + ">"},
             {"before", trunc_old},
             {"after", trunc_new},
-            {"jump_url", "https://app.stoat.chat/channel/" + e.channel_id + "/" + e.id}};
+            {"jump_url", "https://stoat.chat/server/" + server_id + "/channel/" + e.channel_id + "/" + e.id}};
 
         auto default_fallback = [e, author_id, trunc_old, trunc_new]() {
           nlohmann::json embed = nlohmann::json::object();
@@ -2010,7 +2010,7 @@ public:
           {"channel", "<#" + e.channel_id + ">"},
           {"messageId", e.id},
           {"emoji", e.emoji_id},
-          {"jump_url", "https://app.stoat.chat/channel/" + e.channel_id + "/" + e.id}};
+          {"jump_url", "https://stoat.chat/server/" + server_id + "/channel/" + e.channel_id + "/" + e.id}};
 
       auto default_fallback = [e, username]() {
         nlohmann::json embed = nlohmann::json::object();
@@ -2047,7 +2047,7 @@ public:
           {"channel", "<#" + e.channel_id + ">"},
           {"messageId", e.id},
           {"emoji", e.emoji_id},
-          {"jump_url", "https://app.stoat.chat/channel/" + e.channel_id + "/" + e.id}};
+          {"jump_url", "https://stoat.chat/server/" + server_id + "/channel/" + e.channel_id + "/" + e.id}};
 
       auto default_fallback = [e, username]() {
         nlohmann::json embed = nlohmann::json::object();
