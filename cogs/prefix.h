@@ -50,33 +50,23 @@ public:
                     embed["title"] = "custom prefix configuration";
                     embed["colour"] = "#FFD700";
 
-                    std::string desc = "";
-                    desc += "• **default prefix**: `" + bot.config().command_prefix + "` — ";
-                    if (!msg.server_id.empty() && !server_pfx.empty()) {
-                        desc += default_enabled ? "**on** (active alongside server prefixes)\n" : "**off** (suppressed by server prefixes)\n";
-                    } else {
-                        desc += "**on** (always active)\n";
-                    }
-                    desc += "\n";
-
-                    desc += "• **your custom user prefixes**: ";
-                    if (user_pfx.empty()) {
-                        desc += "none configured\n";
-                    } else {
-                        for (size_t i = 0; i < user_pfx.size(); ++i) {
-                            desc += "`" + user_pfx[i] + "`" + (i + 1 < user_pfx.size() ? ", " : "\n");
+                    auto join_pfx = [](const std::vector<std::string>& list) {
+                        if (list.empty()) return std::string("none");
+                        std::string s;
+                        for (size_t i = 0; i < list.size(); ++i) {
+                            s += "`" + list[i] + "`" + (i + 1 < list.size() ? ", " : "");
                         }
-                    }
+                        return s;
+                    };
 
+                    std::string def_state = (!msg.server_id.empty() && !server_pfx.empty())
+                        ? (default_enabled ? "on" : "off")
+                        : "on";
+                    std::string desc = "| scope | prefixes |\n| --- | --- |\n";
+                    desc += "| default | `" + bot.config().command_prefix + "` (" + def_state + ") |\n";
+                    desc += "| user | " + join_pfx(user_pfx) + " |\n";
                     if (!msg.server_id.empty()) {
-                        desc += "• **server custom prefixes**: ";
-                        if (server_pfx.empty()) {
-                            desc += "none configured\n";
-                        } else {
-                            for (size_t i = 0; i < server_pfx.size(); ++i) {
-                                desc += "`" + server_pfx[i] + "`" + (i + 1 < server_pfx.size() ? ", " : "\n");
-                            }
-                        }
+                        desc += "| server | " + join_pfx(server_pfx) + " |\n";
                     }
                     embed["description"] = desc;
                     payload.embeds.push_back(embed);
