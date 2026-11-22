@@ -1,6 +1,7 @@
 #pragma once
 #include "stoatpp/bot_module.h"
 #include "helpers.h"
+#include "chess_engine.h"
 #include <vector>
 #include <string>
 #include <random>
@@ -83,6 +84,16 @@ public:
         bool active = false;
     };
 
+    struct ChessGame {
+        std::string channel_id;
+        std::string message_id;
+        std::string white_id;
+        std::string black_id; // "AI" if vs bot
+        int64_t bet = 0;
+        bool vs_ai = false;
+        bronx::chess::ChessBoard board;
+    };
+
 private:
     std::unordered_map<std::string, DuelChallenge> active_challenges_; // message_id -> challenge
     std::mutex duel_mutex_;
@@ -95,6 +106,9 @@ private:
 
     std::unordered_map<std::string, WordleGame> active_wordle_games_; // channel_id -> game
     std::mutex wordle_mutex_;
+
+    std::unordered_map<std::string, ChessGame> active_chess_games_; // channel_id -> game
+    std::mutex chess_mutex_;
 
     struct ConwayGame {
         std::string channel_id;
@@ -276,6 +290,8 @@ public:
             std::thread([this, &bot, challenge]() {
                 run_russian_roulette_duel(bot, challenge);
             }).detach();
+        } else if (challenge.game_type == "chess") {
+            start_chess_game(bot, challenge.channel_id, challenge.challenger_id, challenge.target_id, false, challenge.bet);
         }
     }
 
@@ -520,6 +536,9 @@ public:
         // host tea command listener in channel
         bot.on_message([this, &bot](const stoatpp::events::Message& msg) {
             if (msg.author.bot) return;
+
+            // 0. Process active chess game moves
+            if (handle_chess_message(bot, msg)) return;
 
             // 1. Process host lobby actions (cancel)
             {
@@ -953,6 +972,107 @@ public:
                 std::thread([this, &bot, msg, word_len]() {
                     run_wordle(bot, msg, word_len);
                 }).detach();
+            },
+            "Games"
+        });
+
+        // chess command
+        bot.register_command({
+            "chess",
+            {"ch"},
+            "play chess in chat (vs AI or @opponent) — type moves like e4, Nf3, e2e4, O-O.",
+            "chess [@opponent|ai|resign|board] [bet]",
+            {"[@opponent|ai|resign|board]", "[bet]"},
+            [this](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                std::string sub = args.empty() ? "" : args[0];
+                std::string low = sub;
+                std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+
+                if (low == "resign" || low == "forfeit" || low == "quit") {
+                    ChessGame game;
+                    bool found = false;
+                    bool white_resigned = false;
+                    {
+                        std::lock_guard<std::mutex> lock(chess_mutex_);
+                        auto it = active_chess_games_.find(msg.channel_id);
+                        if (it != active_chess_games_.end() &&
+                            (msg.author.id == it->second.white_id || msg.author.id == it->second.black_id)) {
+                            white_resigned = (msg.author.id == it->second.white_id);
+                            game = it->second;
+                            active_chess_games_.erase(it);
+                            found = true;
+                        }
+                    }
+                    if (!found) {
+                        bot.send_message(msg.channel_id, bronx::emj_no + " You don't have an active chess game in this channel.");
+                        return;
+                    }
+                    std::string winner_id = white_resigned ? game.black_id : game.white_id;
+                    if (game.bet > 0 && !game.vs_ai && bronx::g_db) {
+                        bronx::g_db->update_balances(winner_id, game.bet * 2, 0);
+                    }
+                    std::string status_text = "🏳️ <@" + msg.author.id + "> resigned! " +
+                        (winner_id == "AI" ? "**Bronx AI** wins!" : "<@" + winner_id + "> wins!");
+                    auto payload = build_chess_payload(game, status_text, 0xE74C3C);
+                    update_chess_board_message(bot, msg.channel_id, msg.id, game.message_id, payload, true);
+                    return;
+                }
+
+                if (low == "board") {
+                    std::lock_guard<std::mutex> lock(chess_mutex_);
+                    auto it = active_chess_games_.find(msg.channel_id);
+                    if (it == active_chess_games_.end()) {
+                        bot.send_message(msg.channel_id, bronx::emj_no + " No active chess game in this channel.");
+                        return;
+                    }
+                    auto payload = build_chess_payload(it->second, "", 0x3498DB);
+                    std::string old_id = it->second.message_id;
+                    bot.send_message(msg.channel_id, payload, [this, &bot, cid = msg.channel_id, old_id](stoatpp::models::Message m, bool ok) {
+                        if (ok && !m.id.empty()) {
+                            if (!old_id.empty()) bot.delete_message(cid, old_id);
+                            std::lock_guard<std::mutex> lock(chess_mutex_);
+                            auto it2 = active_chess_games_.find(cid);
+                            if (it2 != active_chess_games_.end()) it2->second.message_id = m.id;
+                        }
+                    });
+                    return;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(chess_mutex_);
+                    if (active_chess_games_.count(msg.channel_id)) {
+                        bot.send_message(msg.channel_id, bronx::emj_warning + " There is already an active chess game in this channel. Type `resign` or finish it first!");
+                        return;
+                    }
+                }
+
+                if (args.empty() || low == "ai" || low == "bot") {
+                    start_chess_game(bot, msg.channel_id, msg.author.id, "AI", true, 0);
+                    return;
+                }
+
+                std::string target_id;
+                if (!msg.mentions.empty()) {
+                    target_id = msg.mentions[0];
+                } else {
+                    std::string raw = args[0];
+                    if (raw.size() >= 3 && raw[0] == '<' && raw[1] == '@' && raw.back() == '>') {
+                        target_id = raw.substr(2, raw.size() - 3);
+                        if (!target_id.empty() && target_id[0] == '!') target_id.erase(0, 1);
+                    } else if (raw.size() >= 10) {
+                        target_id = raw;
+                    }
+                }
+                if (target_id.empty()) {
+                    bot.send_message(msg.channel_id, bronx::emj_no + " Mention an opponent (`.chess @user [bet]`) or run `.chess` to play vs AI.");
+                    return;
+                }
+                int64_t bet = 0;
+                if (args.size() >= 2) {
+                    try { bet = std::stoll(args[1]); } catch (...) {}
+                    if (bet < 0) bet = 0;
+                }
+                create_challenge(bot, "chess", msg.author.id, target_id, msg.channel_id, bet);
             },
             "Games"
         });
@@ -1658,6 +1778,235 @@ public:
             out += "\n";
         }
         return out;
+    }
+
+    // ---- Chess helpers ----
+
+    stoatpp::models::MessagePayload build_chess_payload(
+        const ChessGame& game,
+        const std::string& status_override = "",
+        uint32_t colour = 0x3498DB) const
+    {
+        stoatpp::models::MessagePayload payload;
+        payload.content = " ";
+        stoatpp::models::Embed embed;
+        embed.set_colour(colour);
+
+        std::string title = "♟️ Chess";
+        if (game.vs_ai) title += " (vs Bronx AI)";
+        else if (game.bet > 0) title += " — " + std::to_string(game.bet) + " coins";
+        embed.set_title(title);
+
+        std::string white_tag = "<@" + game.white_id + ">";
+        std::string black_tag = game.vs_ai ? "**Bronx AI**" : "<@" + game.black_id + ">";
+
+        std::string desc = "⬜ **White:** " + white_tag + "  |  ⬛ **Black:** " + black_tag + "\n";
+        desc += game.board.render_board(false) + "\n";
+
+        if (!game.board.last_move_san.empty()) {
+            desc += "**Last move:** `" + game.board.last_move_san + "`\n";
+        }
+        if (!game.board.captured_by_white.empty() || !game.board.captured_by_black.empty()) {
+            desc += "**Captured:** ⬜ " + game.board.render_captured(game.board.captured_by_white) +
+                    "  |  ⬛ " + game.board.render_captured(game.board.captured_by_black) + "\n";
+        }
+
+        if (!status_override.empty()) {
+            desc += "\n" + status_override;
+        } else {
+            auto st = game.board.status();
+            std::string turn_tag = game.board.white_turn ? white_tag + " (White)" : black_tag + " (Black)";
+            if (st == bronx::chess::GameStatus::Check) {
+                desc += "\n⚠️ **CHECK!** Turn: " + turn_tag;
+            } else {
+                desc += "\nTurn: " + turn_tag + " — type your move (e.g. `e4`, `Nf3`, `e2e4`, `O-O`) or `resign`.";
+            }
+        }
+
+        embed.set_description(desc);
+        payload.add_embed(embed);
+        return payload;
+    }
+
+    void start_chess_game(stoatpp::cluster& bot, const std::string& channel_id,
+                          const std::string& white_id, const std::string& black_id,
+                          bool vs_ai, int64_t bet)
+    {
+        ChessGame game;
+        game.channel_id = channel_id;
+        game.white_id = white_id;
+        game.black_id = black_id;
+        game.vs_ai = vs_ai;
+        game.bet = bet;
+
+        {
+            std::lock_guard<std::mutex> lock(chess_mutex_);
+            if (active_chess_games_.count(channel_id)) {
+                bot.send_message(channel_id, bronx::emj_warning + " A chess game is already active in this channel.");
+                return;
+            }
+            active_chess_games_[channel_id] = game;
+        }
+
+        auto payload = build_chess_payload(game);
+        bot.send_message(channel_id, payload, [this, &bot, channel_id](stoatpp::models::Message res, bool ok) {
+            std::lock_guard<std::mutex> lock(chess_mutex_);
+            if (!ok || res.id.empty()) {
+                active_chess_games_.erase(channel_id);
+                return;
+            }
+            auto it = active_chess_games_.find(channel_id);
+            if (it != active_chess_games_.end()) {
+                it->second.message_id = res.id;
+            }
+        });
+    }
+
+    void update_chess_board_message(stoatpp::cluster& bot,
+                                    const std::string& channel_id,
+                                    const std::string& user_msg_id,
+                                    const std::string& old_board_id,
+                                    const stoatpp::models::MessagePayload& payload,
+                                    bool finished)
+    {
+        bot.delete_message(channel_id, user_msg_id, [this, &bot, channel_id, old_board_id, payload, finished](bool deleted_user) {
+            if (deleted_user && !old_board_id.empty()) {
+                bot.edit_message(channel_id, old_board_id, payload);
+            } else {
+                bot.send_message(channel_id, payload, [this, &bot, channel_id, old_board_id, finished](stoatpp::models::Message new_msg, bool ok) {
+                    if (ok && !new_msg.id.empty()) {
+                        if (!old_board_id.empty()) {
+                            bot.delete_message(channel_id, old_board_id);
+                        }
+                        if (!finished) {
+                            std::lock_guard<std::mutex> lock(chess_mutex_);
+                            auto it = active_chess_games_.find(channel_id);
+                            if (it != active_chess_games_.end()) {
+                                it->second.message_id = new_msg.id;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    bool handle_chess_message(stoatpp::cluster& bot, const stoatpp::events::Message& msg) {
+        std::string trimmed = msg.content;
+        while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.front()))) trimmed.erase(trimmed.begin());
+        while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.back()))) trimmed.pop_back();
+        if (trimmed.empty()) return false;
+
+        std::string low = trimmed;
+        std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+
+        ChessGame game_copy;
+        std::string old_board_id;
+        bool is_resign = (low == "resign" || low == "forfeit");
+        bool is_move = bronx::chess::ChessBoard::is_move_syntax(trimmed);
+        if (!is_resign && !is_move) return false;
+
+        bool finished = false;
+        std::string status_override;
+        uint32_t colour = 0x3498DB;
+        std::string err_msg;
+
+        {
+            std::lock_guard<std::mutex> lock(chess_mutex_);
+            auto it = active_chess_games_.find(msg.channel_id);
+            if (it == active_chess_games_.end()) return false;
+
+            auto& g = it->second;
+            if (msg.author.id != g.white_id && msg.author.id != g.black_id) return false;
+
+            if (is_resign) {
+                bool white_resigned = (msg.author.id == g.white_id);
+                std::string winner_id = white_resigned ? g.black_id : g.white_id;
+                if (g.bet > 0 && !g.vs_ai && bronx::g_db) {
+                    bronx::g_db->update_balances(winner_id, g.bet * 2, 0);
+                }
+                status_override = "🏳️ <@" + msg.author.id + "> resigned! " +
+                    (winner_id == "AI" ? "**Bronx AI** wins!" : "<@" + winner_id + "> wins!");
+                colour = 0xE74C3C;
+                finished = true;
+                old_board_id = g.message_id;
+                game_copy = g;
+                active_chess_games_.erase(it);
+            } else {
+                std::string expected_id = g.board.white_turn ? g.white_id : g.black_id;
+                if (msg.author.id != expected_id) return false;
+
+                std::string san;
+                if (!g.board.parse_and_make_move(trimmed, san, err_msg)) {
+                    // Illegal move: try to delete user's message and show brief warning
+                    bot.delete_message(msg.channel_id, msg.id);
+                    bot.send_message(msg.channel_id, bronx::emj_warning + " " + err_msg,
+                        [&bot, cid = msg.channel_id](stoatpp::models::Message m, bool ok) {
+                            if (ok && !m.id.empty()) {
+                                std::thread([&bot, cid, mid = m.id]() {
+                                    std::this_thread::sleep_for(std::chrono::seconds(3));
+                                    bot.delete_message(cid, mid);
+                                }).detach();
+                            }
+                        });
+                    return true;
+                }
+
+                auto st = g.board.status();
+                if (st == bronx::chess::GameStatus::Checkmate) {
+                    std::string winner_id = !g.board.white_turn ? g.white_id : g.black_id;
+                    if (g.bet > 0 && !g.vs_ai && bronx::g_db) {
+                        bronx::g_db->update_balances(winner_id, g.bet * 2, 0);
+                    }
+                    status_override = "🏆 **CHECKMATE!** " +
+                        (winner_id == "AI" ? "**Bronx AI** wins!" : "<@" + winner_id + "> wins!");
+                    colour = 0x2ECC71;
+                    finished = true;
+                } else if (st == bronx::chess::GameStatus::Stalemate ||
+                           st == bronx::chess::GameStatus::Draw50Move ||
+                           st == bronx::chess::GameStatus::DrawInsufficient) {
+                    if (g.bet > 0 && !g.vs_ai && bronx::g_db) {
+                        bronx::g_db->update_balances(g.white_id, g.bet, 0);
+                        bronx::g_db->update_balances(g.black_id, g.bet, 0);
+                    }
+                    status_override = "🤝 **DRAW!** (" +
+                        std::string(st == bronx::chess::GameStatus::Stalemate ? "Stalemate" :
+                                    st == bronx::chess::GameStatus::Draw50Move ? "50-move rule" : "Insufficient material") + ")";
+                    colour = 0x95A5A6;
+                    finished = true;
+                } else if (g.vs_ai && !g.board.white_turn) {
+                    std::string ai_san;
+                    if (g.board.pick_ai_move(2, ai_san)) {
+                        auto ai_st = g.board.status();
+                        if (ai_st == bronx::chess::GameStatus::Checkmate) {
+                            status_override = "🏆 **CHECKMATE!** **Bronx AI** wins!";
+                            colour = 0xE74C3C;
+                            finished = true;
+                        } else if (ai_st == bronx::chess::GameStatus::Stalemate ||
+                                   ai_st == bronx::chess::GameStatus::Draw50Move ||
+                                   ai_st == bronx::chess::GameStatus::DrawInsufficient) {
+                            status_override = "🤝 **DRAW!**";
+                            colour = 0x95A5A6;
+                            finished = true;
+                        } else if (ai_st == bronx::chess::GameStatus::Check) {
+                            colour = 0xE67E22;
+                        }
+                    }
+                } else if (st == bronx::chess::GameStatus::Check) {
+                    colour = 0xE67E22;
+                }
+
+                old_board_id = g.message_id;
+                game_copy = g;
+                if (finished) {
+                    active_chess_games_.erase(it);
+                }
+            }
+        }
+
+        auto payload = build_chess_payload(game_copy, status_override, colour);
+        update_chess_board_message(bot, msg.channel_id, msg.id, old_board_id, payload, finished);
+        return true;
     }
 };
 

@@ -1,6 +1,7 @@
 #pragma once
 #include "stoatpp/bot_module.h"
 #include "../database.h"
+#include "backup.h"
 #include <string>
 #include <vector>
 #include <unordered_set>
@@ -188,6 +189,91 @@ public:
             };
             send_json(mod_payload);
         };
+
+        // Live server sync: channel create
+        bot.on_channel_create([this, &bot](const stoatpp::events::ChannelCreate& e) {
+            if (!e.channel.server || !e.channel.name || !bronx::g_db) return;
+            std::string server_id = *e.channel.server;
+            std::string ch_name = *e.channel.name;
+            {
+                std::lock_guard<std::mutex> lock(syncs_mutex_);
+                if (sync_suppress_.count("ch:" + server_id + ":" + ch_name)) {
+                    sync_suppress_.erase("ch:" + server_id + ":" + ch_name);
+                    return;
+                }
+            }
+            auto pairs = bronx::g_db->get_server_sync_pairs(server_id);
+            if (pairs.empty()) return;
+            std::string ctype = (e.channel.channel_type.find("Voice") != std::string::npos) ? "Voice" : "Text";
+            send_json({
+                {"type", "sync_channel_event"},
+                {"server_id", server_id},
+                {"action", "create"},
+                {"channel_id", e.channel.id},
+                {"channel_name", ch_name},
+                {"channel_type", ctype}
+            });
+        });
+
+        // Live server sync: member role update
+        bot.on_server_member_update([this, &bot](const stoatpp::events::ServerMemberUpdate& e) {
+            if (!bronx::g_db || !e.data.contains("roles") || !e.data["roles"].is_array()) return;
+            {
+                std::lock_guard<std::mutex> lock(syncs_mutex_);
+                if (sync_suppress_.count("role:" + e.server_id + ":" + e.user_id)) {
+                    sync_suppress_.erase("role:" + e.server_id + ":" + e.user_id);
+                    return;
+                }
+            }
+            auto pairs = bronx::g_db->get_server_sync_pairs(e.server_id);
+            if (pairs.empty()) return;
+            auto srv_opt = bot.get_server(e.server_id);
+            if (!srv_opt) return;
+            nlohmann::json role_names = nlohmann::json::array();
+            for (const auto& rid_j : e.data["roles"]) {
+                if (!rid_j.is_string()) continue;
+                std::string rid = rid_j.get<std::string>();
+                for (const auto& r : srv_opt->roles) {
+                    if (r.id == rid) { role_names.push_back(r.name); break; }
+                }
+            }
+            send_json({
+                {"type", "sync_role_event"},
+                {"server_id", e.server_id},
+                {"target_user_id", e.user_id},
+                {"role_names", role_names}
+            });
+        });
+
+        // Live server sync: bans / unbans via raw gateway events
+        bot.on_raw_event([this, &bot](const std::string& type, const nlohmann::json& data) {
+            if (!bronx::g_db) return;
+            bool is_ban = (type == "ServerMemberBan" || type == "GuildBanAdd");
+            bool is_unban = (type == "ServerMemberUnban" || type == "GuildBanRemove");
+            if (!is_ban && !is_unban) return;
+            std::string server_id = data.value("server", data.value("guild_id", ""));
+            std::string user_id = data.value("user", data.value("user_id", ""));
+            if (user_id.empty() && data.contains("user") && data["user"].is_object()) {
+                user_id = data["user"].value("id", data["user"].value("_id", ""));
+            }
+            if (server_id.empty() || user_id.empty()) return;
+            {
+                std::lock_guard<std::mutex> lock(syncs_mutex_);
+                if (sync_suppress_.count("ban:" + server_id + ":" + user_id)) {
+                    sync_suppress_.erase("ban:" + server_id + ":" + user_id);
+                    return;
+                }
+            }
+            auto pairs = bronx::g_db->get_server_sync_pairs(server_id);
+            if (pairs.empty()) return;
+            send_json({
+                {"type", "sync_ban"},
+                {"server_id", server_id},
+                {"target_user_id", user_id},
+                {"reason", data.value("reason", "Synced across bridge")},
+                {"unban", is_unban}
+            });
+        });
 
         // Database balance update hook
         if (bronx::g_db) {
@@ -756,8 +842,9 @@ public:
                             bot.send_message(channel_id, bronx::emj_warning + " You must be an administrator or trusted user to start a server sync.");
                             return;
                         }
-                        // Snapshot local channels
+                        // Snapshot local channels & full structure
                         nlohmann::json channels = snapshot_server_channels(bot, server_id);
+                        nlohmann::json structure = BackupModule::snapshot_server_json(bot, server_id);
                         {
                             std::lock_guard<std::mutex> lock(pending_sync_gens_mutex_);
                             pending_sync_gens_[user_id] = [&bot, channel_id, user_id](const std::string& code) {
@@ -782,7 +869,8 @@ public:
                             {"type",      "server_sync_generate"},
                             {"user_id",   user_id},
                             {"server_id", server_id},
-                            {"channels",  channels}
+                            {"channels",  channels},
+                            {"structure", structure}
                         };
                         send_json(req);
                     });
@@ -827,6 +915,101 @@ public:
                     }
                     commit_sync_wizard(bot, it->second, user_id);
                     sync_wizards_.erase(it);
+
+                } else if (sub == "mirror" || sub == "clone") {
+                    SyncWizardState state_copy;
+                    {
+                        std::lock_guard<std::mutex> lock(sync_wizard_mutex_);
+                        auto it = sync_wizards_.find(user_id);
+                        if (it == sync_wizards_.end() || !it->second.awaiting_confirm) {
+                            bot.send_message(channel_id, bronx::emj_no + " No active server sync proposal. Run `.serversync <code>` first.");
+                            return;
+                        }
+                        state_copy = it->second;
+                        sync_wizards_.erase(it);
+                    }
+                    if (!state_copy.remote_structure.is_object() || state_copy.remote_structure.empty()) {
+                        bot.send_message(channel_id, bronx::emj_warning + " Remote server structure was not included; confirming matched pairs only.");
+                        commit_sync_wizard(bot, state_copy, user_id);
+                        return;
+                    }
+                    bot.send_message(channel_id, "🪞 **Mirroring remote server structure** (roles, categories, channels) and bridging all channels...");
+                    std::thread([this, &bot, state_copy, user_id, channel_id]() mutable {
+                        std::string apply_res = BackupModule::apply_server_json(bot, state_copy.server_id, state_copy.remote_structure, false, "");
+                        // Re-snapshot local channels and match all remote channels by name
+                        nlohmann::json local_chans = snapshot_server_channels(bot, state_copy.server_id);
+                        std::unordered_map<std::string, std::string> local_by_name;
+                        for (const auto& lc : local_chans) {
+                            std::string nm = lc.value("name", "");
+                            std::transform(nm.begin(), nm.end(), nm.begin(), ::tolower);
+                            if (!nm.empty()) local_by_name[nm] = lc.value("id", "");
+                        }
+                        state_copy.pairs.clear();
+                        for (const auto& rp : state_copy.raw_pairs) {
+                            std::string rch = rp.value("remote_channel_id", "");
+                            std::string rnam = rp.value("remote_channel_name", "");
+                            std::string rnam_low = rnam;
+                            std::transform(rnam_low.begin(), rnam_low.end(), rnam_low.begin(), ::tolower);
+                            if (!rch.empty() && local_by_name.count(rnam_low)) {
+                                state_copy.pairs.push_back({local_by_name[rnam_low], rch});
+                            }
+                        }
+                        commit_sync_wizard(bot, state_copy, user_id);
+                        bot.send_message(channel_id, apply_res + "\n🔗 Bridged **" + std::to_string(state_copy.pairs.size()) + "** channels!");
+                    }).detach();
+
+                } else if (sub == "config" || sub == "settings") {
+                    if (!bronx::g_db) return;
+                    auto pairs = bronx::g_db->get_server_sync_pairs(server_id);
+                    if (pairs.empty()) {
+                        bot.send_message(channel_id, "ℹ️ This server is not synced with any remote server yet.");
+                        return;
+                    }
+                    std::unordered_set<std::string> plats;
+                    for (const auto& p : pairs) plats.insert(p.remote_platform);
+                    std::string out = "⚙️ **Server Sync Settings**\n";
+                    for (const auto& plat : plats) {
+                        auto cfg = bronx::g_db->get_server_sync_settings(server_id, plat);
+                        out += "**Platform `" + plat + "`:**\n"
+                               "• Messages: " + std::string(cfg.sync_messages ? "✅ ON" : "❌ OFF") + "\n"
+                               "• Bans: " + std::string(cfg.sync_bans ? "✅ ON" : "❌ OFF") + "\n"
+                               "• Roles: " + std::string(cfg.sync_roles ? "✅ ON" : "❌ OFF") + "\n"
+                               "• Channels: " + std::string(cfg.sync_channels ? "✅ ON" : "❌ OFF") + "\n";
+                    }
+                    out += "\nUse `.serversync toggle <bans|roles|channels|messages>` to toggle.";
+                    bot.send_message(channel_id, out);
+
+                } else if (sub == "toggle" && args.size() >= 2) {
+                    bot.fetch_member(server_id, user_id, [this, &bot, user_id, server_id, channel_id, args]
+                            (stoatpp::models::Member member, bool success) {
+                        if (!success || !is_user_trusted_or_owner(bot, server_id, user_id, member)) {
+                            bot.send_message(channel_id, bronx::emj_warning + " Permission denied.");
+                            return;
+                        }
+                        if (!bronx::g_db) return;
+                        std::string feat = args[1];
+                        std::transform(feat.begin(), feat.end(), feat.begin(), ::tolower);
+                        auto pairs = bronx::g_db->get_server_sync_pairs(server_id);
+                        std::unordered_set<std::string> plats;
+                        for (const auto& p : pairs) plats.insert(p.remote_platform);
+                        if (plats.empty()) {
+                            bot.send_message(channel_id, bronx::emj_no + " No synced server pairs found.");
+                            return;
+                        }
+                        for (const auto& plat : plats) {
+                            auto cfg = bronx::g_db->get_server_sync_settings(server_id, plat);
+                            if (feat == "bans" || feat == "ban") cfg.sync_bans = !cfg.sync_bans;
+                            else if (feat == "roles" || feat == "role") cfg.sync_roles = !cfg.sync_roles;
+                            else if (feat == "channels" || feat == "channel") cfg.sync_channels = !cfg.sync_channels;
+                            else if (feat == "messages" || feat == "msg") cfg.sync_messages = !cfg.sync_messages;
+                            else {
+                                bot.send_message(channel_id, bronx::emj_no + " Unknown setting. Use `bans`, `roles`, `channels`, or `messages`.");
+                                return;
+                            }
+                            bronx::g_db->save_server_sync_settings(cfg);
+                        }
+                        bot.send_message(channel_id, "✅ Toggled **`" + feat + "`** sync! Run `.serversync config` to view.");
+                    });
 
                 } else if (sub == "edit") {
                     std::lock_guard<std::mutex> lock(sync_wizard_mutex_);
@@ -881,6 +1064,8 @@ private:
         std::string channel_id;           // channel to reply to
         // pairs proposed by the broker (or edited by the user)
         std::vector<std::pair<std::string,std::string>> pairs; // local_ch_id, remote_ch_id
+        nlohmann::json raw_pairs = nlohmann::json::array();
+        nlohmann::json remote_structure = nlohmann::json::object();
         bool awaiting_confirm = false;
         bool awaiting_edit    = false;
     };
@@ -911,7 +1096,7 @@ private:
             }
         }
 
-        table += "\nReply `.serversync yes` to confirm, `.serversync edit` to adjust manually, or ignore to cancel.";
+        table += "\nReply `.serversync yes` to confirm matched pairs, `.serversync mirror` to **clone missing roles, categories & channels** and bridge all of them, `.serversync edit` to adjust manually, or ignore to cancel.";
         bot.send_message(channel_id, table);
         state.awaiting_confirm = true;
         state.awaiting_edit    = false;
@@ -1560,6 +1745,10 @@ private:
             state.server_id       = server_id;
             state.remote_platform = remote_platform;
             state.remote_server_id= remote_server_id;
+            state.raw_pairs       = pairs_json;
+            if (j.contains("remote_structure") && j["remote_structure"].is_object()) {
+                state.remote_structure = j["remote_structure"];
+            }
 
             // Find a reply channel — use any bridged channel in the server,
             // or fall back to the first channel the bot can see.
@@ -1636,6 +1825,135 @@ private:
                 }
             }
             if (cb) cb(found, pairs);
+        }
+        else if (type == "sync_ban_apply") {
+            if (!bronx::g_db) return;
+            std::string remote_plat = j.value("remote_platform", "");
+            std::string remote_srv  = j.value("remote_server_id", "");
+            std::string target_uid  = j.value("target_user_id", "");
+            std::string reason      = j.value("reason", "Synced across bridge");
+            bool unban              = j.value("unban", false);
+            if (target_uid.empty() || remote_srv.empty()) return;
+
+            // Find local server synced to remote_srv
+            std::lock_guard<std::mutex> lock(channels_mutex_);
+            std::unordered_set<std::string> checked_servers;
+            for (const auto& ch : bridged_channels_) {
+                auto ch_opt = bot.get_channel(ch);
+                if (!ch_opt || !ch_opt->server) continue;
+                std::string l_srv = *ch_opt->server;
+                if (!checked_servers.insert(l_srv).second) continue;
+                auto pairs = bronx::g_db->get_server_sync_pairs(l_srv);
+                bool matched = false;
+                for (const auto& p : pairs) {
+                    if (p.remote_platform == remote_plat && p.remote_server_id == remote_srv) {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) continue;
+                auto cfg = bronx::g_db->get_server_sync_settings(l_srv, remote_plat);
+                if (!cfg.sync_bans) continue;
+                {
+                    std::lock_guard<std::mutex> slock(syncs_mutex_);
+                    sync_suppress_.insert("ban:" + l_srv + ":" + target_uid);
+                }
+                if (unban) bot.rest().unban_user(l_srv, target_uid);
+                else bot.rest().ban_user(l_srv, target_uid, reason);
+            }
+        }
+        else if (type == "sync_channel_apply") {
+            if (!bronx::g_db) return;
+            std::string remote_plat = j.value("remote_platform", "");
+            std::string remote_srv  = j.value("remote_server_id", "");
+            std::string action      = j.value("action", "");
+            std::string ch_name     = j.value("channel_name", "");
+            std::string ch_type     = j.value("channel_type", "Text");
+            if (action != "create" || ch_name.empty() || remote_srv.empty()) return;
+
+            std::lock_guard<std::mutex> lock(channels_mutex_);
+            std::unordered_set<std::string> checked_servers;
+            for (const auto& ch : bridged_channels_) {
+                auto ch_opt = bot.get_channel(ch);
+                if (!ch_opt || !ch_opt->server) continue;
+                std::string l_srv = *ch_opt->server;
+                if (!checked_servers.insert(l_srv).second) continue;
+                auto pairs = bronx::g_db->get_server_sync_pairs(l_srv);
+                bool matched = false;
+                for (const auto& p : pairs) {
+                    if (p.remote_platform == remote_plat && p.remote_server_id == remote_srv) {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) continue;
+                auto cfg = bronx::g_db->get_server_sync_settings(l_srv, remote_plat);
+                if (!cfg.sync_channels) continue;
+                auto srv_opt = bot.get_server(l_srv);
+                bool exists = false;
+                if (srv_opt) {
+                    for (const auto& cid : srv_opt->channels) {
+                        auto c2 = bot.get_channel(cid);
+                        if (c2 && c2->name && *c2->name == ch_name) { exists = true; break; }
+                    }
+                }
+                if (!exists) {
+                    {
+                        std::lock_guard<std::mutex> slock(syncs_mutex_);
+                        sync_suppress_.insert("ch:" + l_srv + ":" + ch_name);
+                    }
+                    bot.rest().create_channel(l_srv, ch_type, ch_name);
+                }
+            }
+        }
+        else if (type == "sync_role_apply") {
+            if (!bronx::g_db) return;
+            std::string remote_plat = j.value("remote_platform", "");
+            std::string remote_srv  = j.value("remote_server_id", "");
+            std::string target_uid  = j.value("target_user_id", "");
+            if (target_uid.empty() || remote_srv.empty() || !j.contains("role_names") || !j["role_names"].is_array()) return;
+
+            std::unordered_set<std::string> want_names;
+            for (const auto& rn : j["role_names"]) {
+                if (rn.is_string()) {
+                    std::string s = rn.get<std::string>();
+                    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+                    want_names.insert(s);
+                }
+            }
+
+            std::lock_guard<std::mutex> lock(channels_mutex_);
+            std::unordered_set<std::string> checked_servers;
+            for (const auto& ch : bridged_channels_) {
+                auto ch_opt = bot.get_channel(ch);
+                if (!ch_opt || !ch_opt->server) continue;
+                std::string l_srv = *ch_opt->server;
+                if (!checked_servers.insert(l_srv).second) continue;
+                auto pairs = bronx::g_db->get_server_sync_pairs(l_srv);
+                bool matched = false;
+                for (const auto& p : pairs) {
+                    if (p.remote_platform == remote_plat && p.remote_server_id == remote_srv) {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) continue;
+                auto cfg = bronx::g_db->get_server_sync_settings(l_srv, remote_plat);
+                if (!cfg.sync_roles) continue;
+                auto srv_opt = bot.get_server(l_srv);
+                if (!srv_opt) continue;
+                nlohmann::json role_ids = nlohmann::json::array();
+                for (const auto& r : srv_opt->roles) {
+                    std::string rlow = r.name;
+                    std::transform(rlow.begin(), rlow.end(), rlow.begin(), ::tolower);
+                    if (want_names.count(rlow)) role_ids.push_back(r.id);
+                }
+                {
+                    std::lock_guard<std::mutex> slock(syncs_mutex_);
+                    sync_suppress_.insert("role:" + l_srv + ":" + target_uid);
+                }
+                bot.rest().edit_member(l_srv, target_uid, {{"roles", role_ids}});
+            }
         }
     }
 
@@ -1777,6 +2095,7 @@ private:
 
     std::mutex syncs_mutex_;
     std::unordered_set<std::string> users_syncing_;
+    std::unordered_set<std::string> sync_suppress_;
 
     std::mutex pending_bridge_gens_mutex_;
     std::unordered_map<std::string, std::function<void(const std::string&, const std::string&)>> pending_bridge_gens_;

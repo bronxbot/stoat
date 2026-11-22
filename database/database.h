@@ -486,6 +486,9 @@ public:
 
   std::pair<int, int64_t> sell_all_user_fish(const std::string &user_id);
 
+  std::pair<int, int64_t> sell_all_user_fish_except(const std::string &user_id,
+                                                    uint64_t exclude_fish_id);
+
   std::pair<int, int64_t> sell_user_fish_by_rarity(const std::string &user_id,
                                                    const std::string &rarity);
 
@@ -1230,6 +1233,27 @@ public:
 
   void remove_server_sync_pairs(const std::string &local_server_id,
                                 const std::string &remote_platform);
+
+  // Server backups & presets (Xenon-style)
+  bool save_server_backup(const ServerBackup &backup);
+  std::optional<ServerBackup> get_server_backup(const std::string &backup_id);
+  std::vector<ServerBackup> list_server_backups(const std::string &server_id,
+                                                const std::string &creator_id = "");
+  bool delete_server_backup(const std::string &backup_id);
+
+  bool save_server_preset(const ServerPreset &preset);
+  std::optional<ServerPreset> get_server_preset(const std::string &preset_name);
+  std::vector<ServerPreset> list_server_presets();
+  bool delete_server_preset(const std::string &preset_name);
+
+  void set_auto_backup_config(const ServerAutoBackupConfig &cfg);
+  std::optional<ServerAutoBackupConfig> get_auto_backup_config(const std::string &server_id);
+  std::vector<ServerAutoBackupConfig> get_due_auto_backups(const std::string &platform, uint64_t now_ts);
+  void update_auto_backup_last_run(const std::string &server_id, uint64_t ts);
+
+  void save_server_sync_settings(const ServerSyncSettings &cfg);
+  ServerSyncSettings get_server_sync_settings(const std::string &local_server_id,
+                                              const std::string &remote_platform);
 
 private:
   MYSQL *mysql_ = nullptr;

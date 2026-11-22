@@ -798,4 +798,41 @@ struct UserOptOut {
     bool has(int flag) const { return (flags & flag) != 0; }
 };
 
+struct ServerBackup {
+  std::string backup_id;
+  std::string server_id;
+  std::string creator_id;
+  std::string platform;
+  std::string name;
+  std::string data_json;
+  bool is_auto = false;
+  uint64_t created_at = 0;
+};
+
+struct ServerPreset {
+  std::string preset_name;
+  std::string creator_id;
+  std::string description;
+  std::string data_json;
+  bool is_public = true;
+  uint64_t created_at = 0;
+};
+
+struct ServerAutoBackupConfig {
+  std::string server_id;
+  std::string platform;
+  int interval_hours = 24;
+  uint64_t last_backup_at = 0;
+  bool enabled = false;
+};
+
+struct ServerSyncSettings {
+  std::string local_server_id;
+  std::string remote_platform;
+  bool sync_messages = true;
+  bool sync_bans = true;
+  bool sync_roles = true;
+  bool sync_channels = true;
+};
+
 } // namespace bronx

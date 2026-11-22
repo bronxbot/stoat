@@ -1505,6 +1505,46 @@ bool Database::init_tables() {
                         "  INDEX idx_ssp_server (local_server_id)"
                         ")");
 
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS server_backups ("
+                        "  backup_id VARCHAR(16) PRIMARY KEY,"
+                        "  server_id VARCHAR(64) NOT NULL,"
+                        "  creator_id VARCHAR(64) NOT NULL,"
+                        "  platform VARCHAR(16) NOT NULL,"
+                        "  name VARCHAR(128) NOT NULL,"
+                        "  data_json LONGTEXT NOT NULL,"
+                        "  is_auto TINYINT(1) NOT NULL DEFAULT 0,"
+                        "  created_at BIGINT UNSIGNED NOT NULL DEFAULT 0,"
+                        "  INDEX idx_sb_server (server_id),"
+                        "  INDEX idx_sb_creator (creator_id)"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS server_presets ("
+                        "  preset_name VARCHAR(64) PRIMARY KEY,"
+                        "  creator_id VARCHAR(64) NOT NULL,"
+                        "  description VARCHAR(255) NOT NULL DEFAULT '',"
+                        "  data_json LONGTEXT NOT NULL,"
+                        "  is_public TINYINT(1) NOT NULL DEFAULT 1,"
+                        "  created_at BIGINT UNSIGNED NOT NULL DEFAULT 0"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS server_auto_backups ("
+                        "  server_id VARCHAR(64) PRIMARY KEY,"
+                        "  platform VARCHAR(16) NOT NULL,"
+                        "  interval_hours INT NOT NULL DEFAULT 24,"
+                        "  last_backup_at BIGINT UNSIGNED NOT NULL DEFAULT 0,"
+                        "  enabled TINYINT(1) NOT NULL DEFAULT 1"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS server_sync_settings ("
+                        "  local_server_id VARCHAR(64) NOT NULL,"
+                        "  remote_platform VARCHAR(32) NOT NULL,"
+                        "  sync_messages TINYINT(1) NOT NULL DEFAULT 1,"
+                        "  sync_bans TINYINT(1) NOT NULL DEFAULT 1,"
+                        "  sync_roles TINYINT(1) NOT NULL DEFAULT 1,"
+                        "  sync_channels TINYINT(1) NOT NULL DEFAULT 1,"
+                        "  PRIMARY KEY (local_server_id, remote_platform)"
+                        ")");
+
     // Gambling tables (progressive jackpot, lottery, gambling stats)
     mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS gambling_jackpot ("
                         "  id INT PRIMARY KEY DEFAULT 1,"

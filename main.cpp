@@ -69,6 +69,7 @@ static void handle_shutdown_signal(int sig) {
 #include "cogs/applications.h"
 #include "cogs/auto.h"
 #include "cogs/blackjack.h"
+#include "cogs/backup.h"
 #include "cogs/bridge.h"
 #include "cogs/captcha.h"
 #include "cogs/command_config.h"
@@ -716,6 +717,7 @@ int main(int argc, char *argv[]) {
   bot.use(std::make_unique<bronx::cogs::AliasModule>());
   bot.use(std::make_unique<bronx::cogs::FilterModule>());
   bot.use(std::make_unique<bronx::cogs::BridgeModule>());
+  bot.use(std::make_unique<bronx::cogs::BackupModule>());
   bot.use(std::make_unique<bronx::cogs::LevelingModule>());
   bot.use(std::make_unique<bronx::cogs::FishingModule>());
   bot.use(std::make_unique<bronx::cogs::OwnerModule>());

@@ -1492,12 +1492,13 @@ public:
 
   void execute_sell(stoatpp::cluster &bot, const stoatpp::events::Message &msg, const std::vector<std::string> &args) {
     if (args.size() < 2 || args[1] == "all") {
-      auto [count, total_val] =
-          g_db->sell_all_user_fish(msg.author.id);
-      if (count == 0) {
-        bot.send_message(msg.channel_id,
-                         "You have no fish in your bucket to sell.");
-      } else {
+      auto finish_sell = [this, &bot, msg](int count, int64_t total_val, bool kept_prestige) {
+        if (count == 0) {
+          bot.send_message(msg.channel_id,
+                           kept_prestige ? "ℹ️ Only your prestige fish was in the bucket — nothing sold."
+                                         : "You have no fish in your bucket to sell.");
+          return;
+        }
         auto b_monthly = get_or_init_boss(g_db, "monthly");
         b_monthly.req_progress += total_val;
         if (b_monthly.req_progress >= b_monthly.req_target) {
@@ -1509,14 +1510,68 @@ public:
           }
         }
         g_db->save_global_boss(b_monthly);
-        g_db->add_user_boss_contribution(msg.author.id, "monthly",
-                                         total_val);
+        g_db->add_user_boss_contribution(msg.author.id, "monthly", total_val);
 
         bot.send_message(msg.channel_id,
                          "💰 Sold **" + std::to_string(count) +
                              "** fish for a total of **" +
-                             std::to_string(total_val) + "** coins!");
+                             std::to_string(total_val) + "** coins!" +
+                             (kept_prestige ? " *(kept your prestige fish)*" : ""));
+      };
+
+      auto u_opt = g_db->get_fishing_user(msg.author.id);
+      auto inv = g_db->get_user_fish_inventory(msg.author.id);
+      if (inv.empty()) {
+        bot.send_message(msg.channel_id, "You have no fish in your bucket to sell.");
+        return;
       }
+
+      if (u_opt) {
+        std::string req_rarity;
+        double req_weight = 0.0;
+        get_prestige_fish_requirements(u_opt->fish_prestige, req_rarity, req_weight);
+        auto prestige_fish = find_prestige_qualifying_fish(inv, req_rarity, req_weight);
+        if (prestige_fish) {
+          std::ostringstream prompt;
+          prompt << "⚠️ **Prestige Fish in Bucket!**\n"
+                 << "You have a **" << prestige_fish->rarity << " " << prestige_fish->fish_name
+                 << "** (`" << prestige_fish->weight << " kg`, worth **" << prestige_fish->value
+                 << "** coins) that qualifies for **Prestige " << (u_opt->fish_prestige + 1) << "**!\n\n"
+                 << "Reply with:\n"
+                 << "`1` — **Sell and ignore** (keep this prestige fish)\n"
+                 << "`2` — **Sell and include** (sell everything, including this fish)\n"
+                 << "`3` — **Don't sell** (cancel)";
+          bot.send_message(msg.channel_id, prompt.str());
+
+          uint64_t pfish_id = prestige_fish->id;
+          bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(30),
+              [this, &bot, msg, pfish_id, finish_sell](std::optional<stoatpp::events::Message> reply) {
+                if (!reply) {
+                  bot.send_message(msg.channel_id, "⏱️ Sale timed out — kept all fish in your bucket.");
+                  return;
+                }
+                std::string ans = reply->content;
+                while (!ans.empty() && std::isspace(static_cast<unsigned char>(ans.front()))) ans.erase(ans.begin());
+                while (!ans.empty() && std::isspace(static_cast<unsigned char>(ans.back()))) ans.pop_back();
+                std::string low = ans;
+                std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+
+                if (low == "1" || low == "ignore" || low == "sell and ignore") {
+                  auto [count, total_val] = g_db->sell_all_user_fish_except(msg.author.id, pfish_id);
+                  finish_sell(count, total_val, true);
+                } else if (low == "2" || low == "include" || low == "sell and include") {
+                  auto [count, total_val] = g_db->sell_all_user_fish(msg.author.id);
+                  finish_sell(count, total_val, false);
+                } else {
+                  bot.send_message(msg.channel_id, "❌ Sale cancelled — kept all fish in your bucket.");
+                }
+              });
+          return;
+        }
+      }
+
+      auto [count, total_val] = g_db->sell_all_user_fish(msg.author.id);
+      finish_sell(count, total_val, false);
       return;
     }
 

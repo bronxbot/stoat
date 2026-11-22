@@ -1068,6 +1068,51 @@ namespace bronx {
     return {count, total_val};
   }
 
+  std::pair<int, int64_t> Database::sell_all_user_fish_except(const std::string &user_id,
+                                                              uint64_t exclude_fish_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_)
+      return {0, 0};
+
+    int count = 0;
+    int64_t total_val = 0;
+    std::string esc_uid = escape_string(user_id);
+    std::string sql_select = "SELECT COUNT(*), IFNULL(SUM(value), 0) FROM "
+                             "fish_inventory WHERE user_id = '" +
+                             esc_uid + "' AND id != " + std::to_string(exclude_fish_id);
+    if (mysql_query(mysql_, sql_select.c_str()) == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        MYSQL_ROW row = mysql_fetch_row(res);
+        if (row) {
+          count = row[0] ? std::stoi(row[0]) : 0;
+          total_val = row[1] ? std::stoll(row[1]) : 0;
+        }
+        mysql_free_result(res);
+      }
+    }
+
+    if (count > 0) {
+      std::string sql_del =
+          "DELETE FROM fish_inventory WHERE user_id = '" + esc_uid +
+          "' AND id != " + std::to_string(exclude_fish_id);
+      if (mysql_query(mysql_, sql_del.c_str()) != 0) {
+        std::cerr << "[bronx db] sell_all_user_fish_except delete failed: "
+                  << mysql_error(mysql_) << "\n";
+        return {0, 0};
+      }
+      std::string sql_add_coins = "UPDATE users SET wallet = wallet + " +
+                                  std::to_string(total_val) +
+                                  " WHERE user_id = '" + esc_uid + "'";
+      mysql_query(mysql_, sql_add_coins.c_str());
+      std::string sql_track_earned =
+          "UPDATE user_fishing SET total_earned = total_earned + " +
+          std::to_string(total_val) + " WHERE user_id = '" + esc_uid + "'";
+      mysql_query(mysql_, sql_track_earned.c_str());
+    }
+    return {count, total_val};
+  }
+
   std::pair<int, int64_t> Database::sell_user_fish_by_rarity(const std::string &user_id,
                                                    const std::string &rarity) {
     std::lock_guard<std::mutex> lock(db_mutex_);
