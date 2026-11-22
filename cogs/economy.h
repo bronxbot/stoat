@@ -573,9 +573,10 @@ public:
                 if (top_entries.empty()) {
                     desc = "no user balance records found for this server.";
                 } else {
+                    desc = "| # | user | net worth |\n| --- | --- | --- |\n";
                     int rank = 1;
                     for (const auto& u : top_entries) {
-                        desc += std::to_string(rank) + ". <@" + u.user_id + "> — **" + std::to_string(u.networth) + "** coins\n";
+                        desc += "| " + std::to_string(rank) + " | <@" + u.user_id + "> | **" + std::to_string(u.networth) + "** coins |\n";
                         rank++;
                     }
                     if (!is_global) {
