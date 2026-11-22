@@ -1397,4 +1397,257 @@ namespace bronx {
     return list;
   }
 
+  Database::JackpotInfo Database::get_jackpot_info() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    JackpotInfo info;
+    if (!mysql_) return info;
+    std::string sql = "SELECT pool, times_won, total_won_all_time, last_winner_id, last_won_amount FROM gambling_jackpot WHERE id = 1";
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        if (MYSQL_ROW row = mysql_fetch_row(res)) {
+          info.pool = row[0] ? std::stoll(row[0]) : 1000000;
+          info.times_won = row[1] ? std::stoi(row[1]) : 0;
+          info.total_won_all_time = row[2] ? std::stoll(row[2]) : 0;
+          info.last_winner_id = row[3] ? row[3] : "";
+          info.last_won_amount = row[4] ? std::stoll(row[4]) : 0;
+        }
+        mysql_free_result(res);
+      }
+    }
+    return info;
+  }
+
+  void Database::contribute_to_jackpot(int64_t amount) {
+    if (amount <= 0) return;
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    std::string sql = "UPDATE gambling_jackpot SET pool = pool + " + std::to_string(amount) + " WHERE id = 1";
+    mysql_query(mysql_, sql.c_str());
+  }
+
+  int64_t Database::try_win_jackpot(const std::string &user_id) {
+    int64_t won_pool = 0;
+    {
+      std::lock_guard<std::mutex> lock(db_mutex_);
+      if (!mysql_) return 0;
+      if (mysql_query(mysql_, "SELECT pool FROM gambling_jackpot WHERE id = 1") == 0) {
+        MYSQL_RES *res = mysql_store_result(mysql_);
+        if (res) {
+          if (MYSQL_ROW row = mysql_fetch_row(res)) {
+            won_pool = row[0] ? std::stoll(row[0]) : 0;
+          }
+          mysql_free_result(res);
+        }
+      }
+      if (won_pool <= 0) return 0;
+      std::string esc_u = escape_string(user_id);
+      std::string upd = "UPDATE gambling_jackpot SET pool = 1000000, times_won = times_won + 1, "
+                        "total_won_all_time = total_won_all_time + " + std::to_string(won_pool) +
+                        ", last_winner_id = '" + esc_u + "', last_won_amount = " + std::to_string(won_pool) +
+                        " WHERE id = 1";
+      mysql_query(mysql_, upd.c_str());
+      std::string hist = "INSERT INTO gambling_jackpot_history (user_id, amount) VALUES ('" + esc_u + "', " + std::to_string(won_pool) + ")";
+      mysql_query(mysql_, hist.c_str());
+    }
+    update_balances(user_id, won_pool, 0);
+    return won_pool;
+  }
+
+  std::vector<Database::JackpotHistoryEntry> Database::get_jackpot_history(int limit) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    std::vector<JackpotHistoryEntry> out;
+    if (!mysql_) return out;
+    std::string sql = "SELECT user_id, amount FROM gambling_jackpot_history ORDER BY id DESC LIMIT " + std::to_string(limit);
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res))) {
+          JackpotHistoryEntry e;
+          e.user_id = row[0] ? row[0] : "";
+          e.amount = row[1] ? std::stoll(row[1]) : 0;
+          out.push_back(e);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return out;
+  }
+
+  void Database::record_gambling_result(const std::string &user_id, int64_t bet, int64_t net_delta) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    std::string esc_u = escape_string(user_id);
+    int64_t won_inc = (net_delta > 0) ? 1 : 0;
+    int64_t lost_inc = (net_delta < 0) ? 1 : 0;
+    int64_t prof_inc = (net_delta > 0) ? net_delta : 0;
+    int64_t loss_inc = (net_delta < 0) ? (-net_delta) : 0;
+    std::string sql = "INSERT INTO gambling_stats (user_id, games_played, games_won, games_lost, total_wagered, total_profit, total_losses, biggest_win) VALUES ('" +
+                      esc_u + "', 1, " + std::to_string(won_inc) + ", " + std::to_string(lost_inc) + ", " +
+                      std::to_string(std::max<int64_t>(0, bet)) + ", " + std::to_string(prof_inc) + ", " +
+                      std::to_string(loss_inc) + ", " + std::to_string(prof_inc) + ") "
+                      "ON DUPLICATE KEY UPDATE games_played = games_played + 1, "
+                      "games_won = games_won + " + std::to_string(won_inc) + ", "
+                      "games_lost = games_lost + " + std::to_string(lost_inc) + ", "
+                      "total_wagered = total_wagered + " + std::to_string(std::max<int64_t>(0, bet)) + ", "
+                      "total_profit = total_profit + " + std::to_string(prof_inc) + ", "
+                      "total_losses = total_losses + " + std::to_string(loss_inc) + ", "
+                      "biggest_win = GREATEST(biggest_win, " + std::to_string(prof_inc) + ")";
+    mysql_query(mysql_, sql.c_str());
+  }
+
+  Database::GamblingUserStats Database::get_gambling_stats(const std::string &user_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    GamblingUserStats st;
+    st.user_id = user_id;
+    if (!mysql_) return st;
+    std::string sql = "SELECT games_played, games_won, games_lost, total_wagered, total_profit, total_losses, biggest_win FROM gambling_stats WHERE user_id = '" +
+                      escape_string(user_id) + "'";
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        if (MYSQL_ROW row = mysql_fetch_row(res)) {
+          st.games_played = row[0] ? std::stoll(row[0]) : 0;
+          st.games_won = row[1] ? std::stoll(row[1]) : 0;
+          st.games_lost = row[2] ? std::stoll(row[2]) : 0;
+          st.total_wagered = row[3] ? std::stoll(row[3]) : 0;
+          st.total_profit = row[4] ? std::stoll(row[4]) : 0;
+          st.total_losses = row[5] ? std::stoll(row[5]) : 0;
+          st.biggest_win = row[6] ? std::stoll(row[6]) : 0;
+        }
+        mysql_free_result(res);
+      }
+    }
+    return st;
+  }
+
+  int64_t Database::get_lottery_pool() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    int64_t pool = 30000000;
+    if (!mysql_) return pool;
+    if (mysql_query(mysql_, "SELECT setting_val FROM gambling_settings WHERE setting_key = 'lottery_pool'") == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        if (MYSQL_ROW row = mysql_fetch_row(res)) {
+          if (row[0]) { try { pool = std::stoll(row[0]); } catch (...) {} }
+        }
+        mysql_free_result(res);
+      }
+    }
+    return pool;
+  }
+
+  void Database::add_to_lottery_pool(int64_t delta) {
+    int64_t cur = get_lottery_pool();
+    int64_t next = std::max<int64_t>(30000000, cur + delta);
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    std::string sql = "INSERT INTO gambling_settings (setting_key, setting_val) VALUES ('lottery_pool', '" + std::to_string(next) +
+                      "') ON DUPLICATE KEY UPDATE setting_val = '" + std::to_string(next) + "'";
+    mysql_query(mysql_, sql.c_str());
+  }
+
+  void Database::add_lottery_tickets(const std::string &user_id, int64_t tickets) {
+    if (tickets <= 0) return;
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return;
+    std::string esc_u = escape_string(user_id);
+    std::string sql = "INSERT INTO gambling_lottery (user_id, tickets) VALUES ('" + esc_u + "', " + std::to_string(tickets) +
+                      ") ON DUPLICATE KEY UPDATE tickets = tickets + " + std::to_string(tickets);
+    mysql_query(mysql_, sql.c_str());
+  }
+
+  int64_t Database::get_user_lottery_tickets(const std::string &user_id) {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return 0;
+    std::string sql = "SELECT tickets FROM gambling_lottery WHERE user_id = '" + escape_string(user_id) + "'";
+    int64_t t = 0;
+    if (mysql_query(mysql_, sql.c_str()) == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        if (MYSQL_ROW row = mysql_fetch_row(res)) {
+          if (row[0]) t = std::stoll(row[0]);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return t;
+  }
+
+  int64_t Database::get_total_lottery_tickets() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return 0;
+    int64_t total = 0;
+    if (mysql_query(mysql_, "SELECT IFNULL(SUM(tickets), 0) FROM gambling_lottery WHERE tickets > 0") == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        if (MYSQL_ROW row = mysql_fetch_row(res)) {
+          if (row[0]) total = std::stoll(row[0]);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return total;
+  }
+
+  int64_t Database::get_lottery_participant_count() {
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    if (!mysql_) return 0;
+    int64_t count = 0;
+    if (mysql_query(mysql_, "SELECT COUNT(*) FROM gambling_lottery WHERE tickets > 0") == 0) {
+      MYSQL_RES *res = mysql_store_result(mysql_);
+      if (res) {
+        if (MYSQL_ROW row = mysql_fetch_row(res)) {
+          if (row[0]) count = std::stoll(row[0]);
+        }
+        mysql_free_result(res);
+      }
+    }
+    return count;
+  }
+
+  std::pair<std::string, int64_t> Database::draw_lottery_winner() {
+    std::vector<std::pair<std::string, int64_t>> entries;
+    int64_t total_tickets = 0;
+    int64_t pool = get_lottery_pool();
+    {
+      std::lock_guard<std::mutex> lock(db_mutex_);
+      if (!mysql_) return {"", 0};
+      if (mysql_query(mysql_, "SELECT user_id, tickets FROM gambling_lottery WHERE tickets > 0") == 0) {
+        MYSQL_RES *res = mysql_store_result(mysql_);
+        if (res) {
+          MYSQL_ROW row;
+          while ((row = mysql_fetch_row(res))) {
+            std::string u = row[0] ? row[0] : "";
+            int64_t t = row[1] ? std::stoll(row[1]) : 0;
+            if (!u.empty() && t > 0) {
+              entries.push_back({u, t});
+              total_tickets += t;
+            }
+          }
+          mysql_free_result(res);
+        }
+      }
+      if (entries.empty() || total_tickets <= 0) return {"", 0};
+      mysql_query(mysql_, "DELETE FROM gambling_lottery");
+      mysql_query(mysql_, "UPDATE gambling_settings SET setting_val = '30000000' WHERE setting_key = 'lottery_pool'");
+    }
+
+    std::mt19937_64 rng(std::random_device{}());
+    std::uniform_int_distribution<int64_t> dist(1, total_tickets);
+    int64_t roll = dist(rng);
+    int64_t acc = 0;
+    std::string winner_id = entries.back().first;
+    for (const auto &e : entries) {
+      acc += e.second;
+      if (roll <= acc) {
+        winner_id = e.first;
+        break;
+      }
+    }
+    update_balances(winner_id, pool, 0);
+    return {winner_id, pool};
+  }
+
 } // namespace bronx

@@ -268,6 +268,43 @@ public:
 
   std::vector<GeoStats> get_top_geo_leaderboard(int limit = 10);
 
+  struct JackpotInfo {
+    int64_t pool = 1000000;
+    int times_won = 0;
+    int64_t total_won_all_time = 0;
+    std::string last_winner_id;
+    int64_t last_won_amount = 0;
+  };
+  struct JackpotHistoryEntry {
+    std::string user_id;
+    int64_t amount = 0;
+  };
+  struct GamblingUserStats {
+    std::string user_id;
+    int64_t games_played = 0;
+    int64_t games_won = 0;
+    int64_t games_lost = 0;
+    int64_t total_wagered = 0;
+    int64_t total_profit = 0;
+    int64_t total_losses = 0;
+    int64_t biggest_win = 0;
+  };
+
+  JackpotInfo get_jackpot_info();
+  void contribute_to_jackpot(int64_t amount);
+  int64_t try_win_jackpot(const std::string &user_id);
+  std::vector<JackpotHistoryEntry> get_jackpot_history(int limit = 5);
+  void record_gambling_result(const std::string &user_id, int64_t bet, int64_t net_delta);
+  GamblingUserStats get_gambling_stats(const std::string &user_id);
+
+  int64_t get_lottery_pool();
+  void add_to_lottery_pool(int64_t delta);
+  void add_lottery_tickets(const std::string &user_id, int64_t tickets);
+  int64_t get_user_lottery_tickets(const std::string &user_id);
+  int64_t get_total_lottery_tickets();
+  int64_t get_lottery_participant_count();
+  std::pair<std::string, int64_t> draw_lottery_winner();
+
   bool update_balances(const std::string &user_id, int64_t wallet_delta,
                        int64_t bank_delta);
 

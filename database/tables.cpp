@@ -1505,6 +1505,46 @@ bool Database::init_tables() {
                         "  INDEX idx_ssp_server (local_server_id)"
                         ")");
 
+    // Gambling tables (progressive jackpot, lottery, gambling stats)
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS gambling_jackpot ("
+                        "  id INT PRIMARY KEY DEFAULT 1,"
+                        "  pool BIGINT NOT NULL DEFAULT 1000000,"
+                        "  times_won INT NOT NULL DEFAULT 0,"
+                        "  total_won_all_time BIGINT NOT NULL DEFAULT 0,"
+                        "  last_winner_id VARCHAR(64) NOT NULL DEFAULT '',"
+                        "  last_won_amount BIGINT NOT NULL DEFAULT 0"
+                        ")");
+    mysql_query(mysql_, "INSERT IGNORE INTO gambling_jackpot (id, pool) VALUES (1, 1000000)");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS gambling_jackpot_history ("
+                        "  id INT AUTO_INCREMENT PRIMARY KEY,"
+                        "  user_id VARCHAR(64) NOT NULL,"
+                        "  amount BIGINT NOT NULL,"
+                        "  won_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS gambling_lottery ("
+                        "  user_id VARCHAR(64) PRIMARY KEY,"
+                        "  tickets BIGINT NOT NULL DEFAULT 0"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS gambling_settings ("
+                        "  setting_key VARCHAR(64) PRIMARY KEY,"
+                        "  setting_val VARCHAR(255) NOT NULL"
+                        ")");
+    mysql_query(mysql_, "INSERT IGNORE INTO gambling_settings (setting_key, setting_val) VALUES ('lottery_pool', '30000000')");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS gambling_stats ("
+                        "  user_id VARCHAR(64) PRIMARY KEY,"
+                        "  games_played BIGINT NOT NULL DEFAULT 0,"
+                        "  games_won BIGINT NOT NULL DEFAULT 0,"
+                        "  games_lost BIGINT NOT NULL DEFAULT 0,"
+                        "  total_wagered BIGINT NOT NULL DEFAULT 0,"
+                        "  total_profit BIGINT NOT NULL DEFAULT 0,"
+                        "  total_losses BIGINT NOT NULL DEFAULT 0,"
+                        "  biggest_win BIGINT NOT NULL DEFAULT 0"
+                        ")");
+
     return true;
 }
 
