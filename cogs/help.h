@@ -16,7 +16,7 @@ namespace bronx::cogs {
 class HelpModule : public stoatpp::bot_module {
 public:
     struct HelpSession {
-        int current_category_idx = 0;
+        int current_category_idx = -1; // -1 = Overview page
         int current_page_idx = 0;
         std::string user_id;
         std::string prefix;
@@ -384,7 +384,7 @@ public:
                     }
 
                     HelpSession session;
-                    session.current_category_idx = 0;
+                    session.current_category_idx = -1;
                     session.current_page_idx = 0;
                     session.user_id = msg.author.id;
                     session.prefix = prefix;
@@ -396,7 +396,7 @@ public:
                         if (success) {
                             {
                                 std::lock_guard<std::mutex> lock(help_mutex_);
-                                help_sessions_[res.id] = {0, 0, msg.author.id, prefix};
+                                help_sessions_[res.id] = {-1, 0, msg.author.id, prefix};
                             }
                         }
                     });
@@ -493,10 +493,10 @@ public:
             
             // ⏪: Prev Category
             if (e.emoji_id == "⏪" || e.emoji_id == "⏮" || e.emoji_id == "⏮️") {
-                if (session.current_category_idx > 0) {
+                if (session.current_category_idx > -1) {
                     session.current_category_idx--;
                 } else {
-                    session.current_category_idx = categories.size() - 1;
+                    session.current_category_idx = static_cast<int>(categories.size()) - 1;
                 }
                 session.current_page_idx = 0;
                 changed = true;
@@ -506,36 +506,46 @@ public:
                 if (session.current_category_idx < static_cast<int>(categories.size()) - 1) {
                     session.current_category_idx++;
                 } else {
-                    session.current_category_idx = 0;
+                    session.current_category_idx = -1;
                 }
                 session.current_page_idx = 0;
                 changed = true;
             }
             // ◀ / ⬅: Prev Page in Category
             else if (e.emoji_id == "◀" || e.emoji_id == "⬅" || e.emoji_id == "⬅️" || e.emoji_id == "◀️") {
-                std::string cat = categories[session.current_category_idx];
-                int cmds_size = commands_by_cat[cat].size();
-                int max_pages = (cmds_size + 2) / 3;
-                if (max_pages == 0) max_pages = 1;
-
-                if (session.current_page_idx > 0) {
-                    session.current_page_idx--;
+                if (session.current_category_idx < 0) {
+                    session.current_category_idx = static_cast<int>(categories.size()) - 1;
+                    session.current_page_idx = 0;
                 } else {
-                    session.current_page_idx = max_pages - 1;
+                    std::string cat = categories[session.current_category_idx];
+                    int cmds_size = commands_by_cat[cat].size();
+                    int max_pages = (cmds_size + 2) / 3;
+                    if (max_pages == 0) max_pages = 1;
+
+                    if (session.current_page_idx > 0) {
+                        session.current_page_idx--;
+                    } else {
+                        session.current_page_idx = max_pages - 1;
+                    }
                 }
                 changed = true;
             }
             // ▶ / ➡: Next Page in Category
             else if (e.emoji_id == "▶" || e.emoji_id == "➡" || e.emoji_id == "➡️" || e.emoji_id == "▶️") {
-                std::string cat = categories[session.current_category_idx];
-                int cmds_size = commands_by_cat[cat].size();
-                int max_pages = (cmds_size + 2) / 3;
-                if (max_pages == 0) max_pages = 1;
-
-                if (session.current_page_idx < max_pages - 1) {
-                    session.current_page_idx++;
-                } else {
+                if (session.current_category_idx < 0) {
+                    session.current_category_idx = 0;
                     session.current_page_idx = 0;
+                } else {
+                    std::string cat = categories[session.current_category_idx];
+                    int cmds_size = commands_by_cat[cat].size();
+                    int max_pages = (cmds_size + 2) / 3;
+                    if (max_pages == 0) max_pages = 1;
+
+                    if (session.current_page_idx < max_pages - 1) {
+                        session.current_page_idx++;
+                    } else {
+                        session.current_page_idx = 0;
+                    }
                 }
                 changed = true;
             }
@@ -730,73 +740,93 @@ private:
         const HelpSession& session,
         const std::string& prefix
     ) {
-        std::string cat = categories[session.current_category_idx];
-        const auto& cmds = commands_by_cat.at(cat);
-
-        int commands_per_page = 3;
-        int max_pages = (cmds.size() + commands_per_page - 1) / commands_per_page;
-        if (max_pages == 0) max_pages = 1;
-
-        int page = session.current_page_idx;
-        if (page >= max_pages) page = 0;
-
         stoatpp::models::MessagePayload payload;
         payload.content = " ";
-        
+
         stoatpp::models::Embed embed;
-        embed.set_colour(0x5865F2)
-             .set_title("Help — " + cat + " (" + std::to_string(page + 1) + "/" + std::to_string(max_pages) + ")");
+        embed.set_colour(0x5865F2);
 
-        std::string desc = "";
+        if (session.current_category_idx < 0 || session.current_category_idx >= static_cast<int>(categories.size())) {
+            size_t total_cmds = 0;
+            for (const auto& cat : categories) {
+                total_cmds += commands_by_cat.at(cat).size();
+            }
 
-        size_t start_idx = page * commands_per_page;
-        for (size_t i = start_idx; i < start_idx + commands_per_page && i < cmds.size(); ++i) {
-            const auto& cmd = cmds[i];
-            desc += "• **" + prefix + cmd.name + "**";
-            if (!cmd.aliases.empty()) {
-                desc += " *(aliases: ";
-                for (size_t a = 0; a < cmd.aliases.size(); ++a) {
-                    desc += "`" + prefix + cmd.aliases[a] + "`" + (a + 1 < cmd.aliases.size() ? ", " : "");
+            embed.set_title("Help - Overview (" + std::to_string(categories.size()) + " cogs, " + std::to_string(total_cmds) + " commands)");
+            std::string desc = "Use `⏩` / `⏪` to browse cogs, `◀` / `▶` for pages, `🟦` to jump, or `" + prefix + "help <command|cog>`.\n\n";
+            for (size_t i = 0; i < categories.size(); ++i) {
+                const auto& cat = categories[i];
+                desc += "• **" + cat + "** - " + std::to_string(commands_by_cat.at(cat).size()) + " commands\n";
+            }
+            embed.set_description(desc);
+            payload.add_embed(embed);
+        } else {
+            std::string cat = categories[session.current_category_idx];
+            const auto& cmds = commands_by_cat.at(cat);
+
+            int commands_per_page = 3;
+            int max_pages = (cmds.size() + commands_per_page - 1) / commands_per_page;
+            if (max_pages == 0) max_pages = 1;
+
+            int page = session.current_page_idx;
+            if (page >= max_pages) page = 0;
+
+            embed.set_title("Help - " + cat + " (" + std::to_string(page + 1) + "/" + std::to_string(max_pages) + ")");
+
+            std::string desc = "";
+            size_t start_idx = page * commands_per_page;
+            for (size_t i = start_idx; i < start_idx + commands_per_page && i < cmds.size(); ++i) {
+                const auto& cmd = cmds[i];
+                desc += "• **" + prefix + cmd.name + "**";
+                if (!cmd.aliases.empty()) {
+                    desc += " *(aliases: ";
+                    for (size_t a = 0; a < cmd.aliases.size(); ++a) {
+                        desc += "`" + prefix + cmd.aliases[a] + "`" + (a + 1 < cmd.aliases.size() ? ", " : "");
+                    }
+                    desc += ")*";
                 }
-                desc += ")*";
-            }
-            desc += "\n";
+                desc += "\n";
 
-            std::string syntax = prefix + cmd.name;
-            if (!cmd.args.empty()) {
-                for (const auto& arg : cmd.args) {
-                    syntax += " " + arg;
+                std::string syntax = prefix + cmd.name;
+                if (!cmd.args.empty()) {
+                    for (const auto& arg : cmd.args) {
+                        syntax += " " + arg;
+                    }
+                } else if (!cmd.usage.empty()) {
+                    syntax = cmd.usage;
                 }
-            } else if (!cmd.usage.empty()) {
-                syntax = cmd.usage;
-            }
-            desc += "  *syntax:* `" + syntax + "`\n";
+                desc += "  *syntax:* `" + syntax + "`\n";
 
-            if (!cmd.description.empty()) {
-                desc += "  *description:* " + cmd.description + "\n";
-            }
-
-            if (!cmd.subcommands.empty()) {
-                for (const auto& sub : cmd.subcommands) {
-                    desc += "  - `" + sub + "`\n";
+                if (!cmd.description.empty()) {
+                    desc += "  *description:* " + cmd.description + "\n";
                 }
+
+                if (!cmd.subcommands.empty()) {
+                    for (const auto& sub : cmd.subcommands) {
+                        desc += "  - `" + sub + "`\n";
+                    }
+                }
+                desc += "\n";
             }
-            desc += "\n";
+
+            embed.set_description(desc);
+            payload.add_embed(embed);
         }
 
-        desc += "--- \n**categories:** ";
+        // Second compact embed for category navigation
+        stoatpp::models::Embed nav_embed;
+        nav_embed.set_colour(0x2B2D31);
+        std::string cats_line = (session.current_category_idx < 0 ? "__**[Overview]**__" : "Overview");
         for (size_t i = 0; i < categories.size(); ++i) {
-            std::string display_name = categories[i];
-            if (i == static_cast<size_t>(session.current_category_idx)) {
-                desc += "__**[" + display_name + "]**__";
+            cats_line += " · ";
+            if (static_cast<int>(i) == session.current_category_idx) {
+                cats_line += "__**[" + categories[i] + "]**__";
             } else {
-                desc += display_name;
+                cats_line += categories[i];
             }
-            if (i + 1 < categories.size()) desc += " · ";
         }
-
-        embed.set_description(desc);
-        payload.add_embed(embed);
+        nav_embed.set_description(cats_line);
+        payload.add_embed(nav_embed);
         return payload;
     }
 };
