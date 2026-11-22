@@ -123,14 +123,14 @@ public:
 
                         stoatpp::models::MessagePayload payload;
                         nlohmann::json embed = nlohmann::json::object();
-                        embed["title"] = "🌐 Server Listing Configuration: " + srv_name;
+                        embed["title"] = "Server Listing Configuration: " + srv_name;
                         embed["colour"] = "#a78bfa";
 
                         std::string desc = "";
                         if (!exists) {
-                            desc += "ℹ️ **This server is not listed yet.**\n"
+                            desc += "**This server is not listed yet.**\n"
                                     "To list your server on the public web directory and participate in the P2P advertising network, run:\n"
-                                    "👉 `" + pfx + "list setup` *(Requires Manage Server permission)*\n\n";
+                                    "`" + pfx + "list setup` *(Requires Manage Server permission)*\n\n";
                         }
 
                         desc += "**Current Configuration:**\n"
@@ -143,11 +143,11 @@ public:
                                 "• **Custom Embed JSON:** " + (listing.embed_json.empty() ? "*none*" : "\n```json\n" + listing.embed_json + "\n```") + "\n\n";
 
                         desc += "**Available Commands:**\n"
-                                "• `" + pfx + "list setup` — Interactive wizard to list your server.\n"
-                                "• `" + pfx + "list set <key> <value>` — Set specific settings (mode, channel, tags, desc, invite, embed).\n"
-                                "• `" + pfx + "list config` — View your current server configuration.\n"
-                                "• `" + pfx + "list submit` — Submit your server for staff review.\n"
-                                "• `" + pfx + "list bump` — Bump your server and broadcast its ad embed.\n";
+                                "• `" + pfx + "list setup` - Interactive wizard to list your server.\n"
+                                "• `" + pfx + "list set <key>:<value>` - Set specific settings (mode, channel, tags, desc, invite, embed).\n"
+                                "• `" + pfx + "list config` - View your current server configuration.\n"
+                                "• `" + pfx + "list submit` - Submit your server for staff review.\n"
+                                "• `" + pfx + "list bump` - Bump your server and broadcast its ad embed.\n";
 
                         if (is_admin || bot.is_owner(msg.author.id)) {
                             desc += "\n*You have permission to edit this configuration.*";
@@ -238,7 +238,7 @@ public:
 
                         if (subcommand == "submit") {
                             if (listing.mode == "disabled") {
-                                bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Listing is currently disabled. Use `.list set mode <website|bump|both>` before submitting.");
+                                bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Listing is currently disabled. Use `.list set mode:<website|bump|both>` before submitting.");
                                 return;
                             }
                             if (listing.description.empty()) {
@@ -286,19 +286,32 @@ public:
                         }
 
                         if (subcommand == "set") {
-                            if (args.size() < 3) {
-                                bot.send_message(msg.channel_id, "usage: `.list set <mode|channel|tags|desc|invite|embed> <value...>`");
+                            if (args.size() < 2) {
+                                bot.send_message(msg.channel_id, "usage: `.list set <mode|channel|tags|desc|invite|embed>:<value...>`");
                                 return;
                             }
-                            std::string key = args[1];
-                            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-                            
-                            // Combine arguments for value
-                            std::string val = "";
-                            for (size_t i = 2; i < args.size(); ++i) {
-                                val += args[i] + " ";
+                            std::string key;
+                            std::string val;
+                            auto colon_pos = args[1].find(':');
+                            if (colon_pos != std::string::npos) {
+                                key = args[1].substr(0, colon_pos);
+                                std::string first_val = args[1].substr(colon_pos + 1);
+                                if (!first_val.empty()) val = first_val + " ";
+                                for (size_t i = 2; i < args.size(); ++i) {
+                                    val += args[i] + " ";
+                                }
+                                if (!val.empty()) val.pop_back();
+                            } else if (args.size() >= 3) {
+                                key = args[1];
+                                for (size_t i = 2; i < args.size(); ++i) {
+                                    val += args[i] + " ";
+                                }
+                                if (!val.empty()) val.pop_back();
+                            } else {
+                                bot.send_message(msg.channel_id, "usage: `.list set <mode|channel|tags|desc|invite|embed>:<value...>`");
+                                return;
                             }
-                            if (!val.empty()) val.pop_back(); // remove trailing space
+                            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
 
                             bool needs_reapproval = false;
 
@@ -435,7 +448,7 @@ public:
                                 return;
                             }
                             if (listing.mode != "bump" && listing.mode != "both" && listing.mode != "website") {
-                                bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Bumping is not enabled for your server. Set your listing mode to `website`, `bump`, or `both` using `.list set mode both`.");
+                                bot.send_message(msg.channel_id, "" + bronx::emj_warning + " Bumping is not enabled for your server. Set your listing mode to `website`, `bump`, or `both` using `.list set mode:both`.");
                                 return;
                             }
 
