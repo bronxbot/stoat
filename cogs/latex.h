@@ -56,7 +56,7 @@ private:
       return {};
     }
 
-    std::string full_tex = "\\dpi{220}\\color{White}" + formula;
+    std::string full_tex = "\\dpi{220}\\bg{1e1f22}\\color{White}" + formula;
     char *escaped = curl_easy_escape(curl, full_tex.c_str(), static_cast<int>(full_tex.size()));
     if (!escaped) {
       curl_easy_cleanup(curl);
