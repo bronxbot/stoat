@@ -221,12 +221,15 @@ public:
                 embed.set_title("Deleted Message" + (index > 1 ? " #" + std::to_string(index) : ""));
                 embed.set_colour("#ED4245");
 
+                std::string jump_base = msg.server_id.empty()
+                    ? ("https://stoat.chat/channel/" + msg.channel_id + "/")
+                    : ("https://stoat.chat/server/" + msg.server_id + "/channel/" + msg.channel_id + "/");
                 std::string desc = "**Author:** <@" + s.author_id + ">\n";
                 if (!s.content.empty()) {
                     std::string trunc = s.content.size() > 1800 ? s.content.substr(0, 1800) + "..." : s.content;
-                    desc += "**Content:** [" + trunc + "](https://app.revolt.chat/channel/" + msg.channel_id + "/" + s.msg_id + ")\n";
+                    desc += "**Content:** [" + trunc + "](" + jump_base + s.msg_id + ")\n";
                 } else {
-                    desc += "**Message:** [Jump to message](https://app.revolt.chat/channel/" + msg.channel_id + "/" + s.msg_id + ")\n";
+                    desc += "**Message:** [Jump to message](" + jump_base + s.msg_id + ")\n";
                 }
                 if (!s.attachments.empty()) {
                     desc += "**Attachments:** " + std::to_string(s.attachments.size()) + " file(s)\n";
@@ -290,9 +293,12 @@ public:
                 embed.set_title("Reaction Sniped" + (index > 1 ? " #" + std::to_string(index) : ""));
                 embed.set_colour("#E67E22");
 
+                std::string jump_url = msg.server_id.empty()
+                    ? ("https://stoat.chat/channel/" + msg.channel_id + "/" + s.message_id)
+                    : ("https://stoat.chat/server/" + msg.server_id + "/channel/" + msg.channel_id + "/" + s.message_id);
                 std::string desc = "**User:** <@" + s.user_id + ">\n"
                                    "**Reaction:** " + formatted_emoji + "\n"
-                                   "**Message:** [Jump to message](https://app.revolt.chat/channel/" + msg.channel_id + "/" + s.message_id + ")\n";
+                                   "**Message:** [Jump to message](" + jump_url + ")\n";
                 if (s.timestamp_ms > 0) {
                     desc += "**Removed:** " + stoatpp::utils::format_timestamp(static_cast<int64_t>(s.timestamp_ms / 1000), "R");
                 }
@@ -346,7 +352,10 @@ public:
 
                 desc += "**Before:**\n" + old_trunc + "\n\n";
                 desc += "**After:**\n" + new_trunc + "\n\n";
-                desc += "**Message:** [Jump to message](https://app.revolt.chat/channel/" + msg.channel_id + "/" + s.msg_id + ")\n";
+                std::string jump_url = msg.server_id.empty()
+                    ? ("https://stoat.chat/channel/" + msg.channel_id + "/" + s.msg_id)
+                    : ("https://stoat.chat/server/" + msg.server_id + "/channel/" + msg.channel_id + "/" + s.msg_id);
+                desc += "**Message:** [Jump to message](" + jump_url + ")\n";
 
                 if (s.timestamp_ms > 0) {
                     desc += "**Edited:** " + stoatpp::utils::format_timestamp(static_cast<int64_t>(s.timestamp_ms / 1000), "R");
