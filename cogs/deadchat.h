@@ -242,11 +242,102 @@ public:
             }
 
             std::string pfx = msg.prefix.empty() ? bot.config().command_prefix : msg.prefix;
-            if (args.empty()) {
+            auto extract_ch = [&](const std::string &raw) {
+              if (raw.size() > 3 && raw.rfind("<#", 0) == 0 && raw.back() == '>') {
+                return raw.substr(2, raw.size() - 3);
+              }
+              return raw;
+            };
+            auto resolve_role = [&](std::string q) -> std::string {
+              if (q == "none" || q == "off" || q == "skip") return "";
+              if (q.size() > 3 && q.rfind("<@&", 0) == 0 && q.back() == '>')
+                q = q.substr(3, q.size() - 4);
+              auto srv_opt = bot.get_server(msg.server_id);
+              if (srv_opt) {
+                std::string low_q = q;
+                std::transform(low_q.begin(), low_q.end(), low_q.begin(), ::tolower);
+                for (const auto &r : srv_opt->roles) {
+                  std::string low_r = r.name;
+                  std::transform(low_r.begin(), low_r.end(), low_r.begin(), ::tolower);
+                  if (r.id == q || low_r == low_q) return r.id;
+                }
+              }
+              return q;
+            };
+
+            std::string first_low = args.empty() ? "" : args[0];
+            std::transform(first_low.begin(), first_low.end(), first_low.begin(), ::tolower);
+
+            if (args.empty() || first_low == "setup") {
+              auto list = bronx::g_db->get_server_dead_chat_configs(msg.server_id);
+              std::string intro = "💀 **Dead Chat Setup Wizard**\n";
+              if (!list.empty()) {
+                intro += "\n| Channel | Role | p-Thresh | Status |\n| --- | --- | --- | --- |\n";
+                for (const auto &c : list) {
+                  std::string rdisp = c.ping_role_id.empty() ? "none" : ("<@&" + c.ping_role_id + ">");
+                  intro += "| <#" + c.channel_id + "> | " + rdisp + " | " +
+                           std::to_string(c.p_threshold).substr(0, 5) + " | " + (c.enabled ? "on" : "off") + " |\n";
+                }
+              }
+              intro += "\n**Step 1/3:** Mention the channel to monitor (e.g. `<#" + msg.channel_id + ">`), reply `here` for this channel, or `cancel` to exit.";
+              bot.send_message(msg.channel_id, intro);
+
+              bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(60),
+                  [this, &bot, msg, extract_ch, resolve_role](std::optional<stoatpp::events::Message> r1) {
+                if (!r1) { bot.send_message(msg.channel_id, "⏱️ Dead chat setup timed out."); return; }
+                std::string t1 = r1->content;
+                std::transform(t1.begin(), t1.end(), t1.begin(), ::tolower);
+                if (t1 == "cancel") { bot.send_message(msg.channel_id, bronx::emj_no + " Setup canceled."); return; }
+                std::string ch_id = (t1 == "here" || t1 == "this") ? msg.channel_id : extract_ch(r1->content);
+                if (ch_id.empty()) ch_id = msg.channel_id;
+
+                auto cfg = bronx::g_db->get_dead_chat_config(msg.server_id, ch_id).value_or(bronx::DeadChatConfig{});
+                cfg.server_id = msg.server_id;
+                cfg.channel_id = ch_id;
+                if (cfg.notify_channel_id.empty()) cfg.notify_channel_id = ch_id;
+                cfg.enabled = true;
+
+                bot.send_message(msg.channel_id, "**Step 2/3:** Mention a role to ping when chat dies (or reply `none` / `skip`).");
+                bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(60),
+                    [this, &bot, msg, cfg, resolve_role](std::optional<stoatpp::events::Message> r2) mutable {
+                  if (!r2) { bot.send_message(msg.channel_id, "⏱️ Dead chat setup timed out."); return; }
+                  std::string t2 = r2->content;
+                  std::transform(t2.begin(), t2.end(), t2.begin(), ::tolower);
+                  if (t2 == "cancel") { bot.send_message(msg.channel_id, bronx::emj_no + " Setup canceled."); return; }
+                  if (t2 != "skip") {
+                    cfg.ping_role_id = resolve_role(r2->content);
+                  }
+
+                  bot.send_message(msg.channel_id, "**Step 3/3:** Choose sensitivity (`low`, `medium`, `high`, or `skip` for `medium`).");
+                  bot.await_message(msg.channel_id, msg.author.id, std::chrono::seconds(60),
+                      [this, &bot, msg, cfg](std::optional<stoatpp::events::Message> r3) mutable {
+                    if (!r3) { bot.send_message(msg.channel_id, "⏱️ Dead chat setup timed out."); return; }
+                    std::string t3 = r3->content;
+                    std::transform(t3.begin(), t3.end(), t3.begin(), ::tolower);
+                    if (t3 == "cancel") { bot.send_message(msg.channel_id, bronx::emj_no + " Setup canceled."); return; }
+                    if (t3 == "low") cfg.p_threshold = 0.005;
+                    else if (t3 == "high") cfg.p_threshold = 0.05;
+                    else if (t3 == "medium" || t3 == "med" || t3 == "skip") cfg.p_threshold = 0.02;
+                    else { try { cfg.p_threshold = std::max(0.001, std::min(0.25, std::stod(t3))); } catch (...) {} }
+
+                    bronx::g_db->save_dead_chat_config(cfg);
+                    refresh_monitored_configs();
+                    bot.send_message(msg.channel_id,
+                        "✅ **Dead Chat Notifier Configured!**\n"
+                        "• **Channel:** <#" + cfg.channel_id + ">\n"
+                        "• **Ping Role:** " + (cfg.ping_role_id.empty() ? "none" : "<@&" + cfg.ping_role_id + ">") + "\n"
+                        "• **Sensitivity (p-thresh):** " + std::to_string(cfg.p_threshold).substr(0, 5));
+                  });
+                });
+              });
+              return;
+            }
+
+            if (first_low == "status" || first_low == "list") {
               auto list = bronx::g_db->get_server_dead_chat_configs(msg.server_id);
               std::string out = "💀 **Dead Chat Notifier (168-Bin Poisson + Hawkes)**\n\n";
               if (list.empty()) {
-                out += "*No monitored channels configured.*\n";
+                out += "*No monitored channels configured.* Run `" + pfx + "deadchat` to start the setup wizard.\n";
               } else {
                 out += "| Channel | Notify | Role | p-Thresh | Min Speakers | Cooldown | Status |\n"
                        "| --- | --- | --- | --- | --- | --- | --- |\n";
@@ -257,26 +348,43 @@ public:
                          " | " + std::to_string(c.cooldown_sec) + "s | " + (c.enabled ? "on" : "off") + " |\n";
                 }
               }
-              out += "\nSetup:\n"
-                     "• `" + pfx + "deadchat channel <#channel>` - Monitor a channel (defaults to current)\n"
-                     "• `" + pfx + "deadchat notify <#channel>` - Send alerts to a different channel\n"
-                     "• `" + pfx + "deadchat role <role|none>` - Role to ping when chat dies\n"
-                     "• `" + pfx + "deadchat sensitivity <low|medium|high|0.005-0.25>`\n"
-                     "• `" + pfx + "deadchat speakers <1-10>` / `cooldown <sec>` / `message <text>`\n"
-                     "• `" + pfx + "deadchat off [#channel]` - Disable notifier";
               bot.send_message(msg.channel_id, out);
               return;
             }
 
-            std::string sub = args[0];
-            std::transform(sub.begin(), sub.end(), sub.begin(), ::tolower);
-
-            auto extract_ch = [&](const std::string &raw) {
-              if (raw.size() > 3 && raw.rfind("<#", 0) == 0 && raw.back() == '>') {
-                return raw.substr(2, raw.size() - 3);
+            // Smart inference when passing mentions/presets directly without a subcommand
+            if (args[0].rfind("<#", 0) == 0 && args[0].back() == '>') {
+              std::string ch_id = extract_ch(args[0]);
+              auto cfg = bronx::g_db->get_dead_chat_config(msg.server_id, ch_id).value_or(bronx::DeadChatConfig{});
+              cfg.server_id = msg.server_id;
+              cfg.channel_id = ch_id;
+              if (cfg.notify_channel_id.empty()) cfg.notify_channel_id = ch_id;
+              cfg.enabled = true;
+              if (args.size() >= 2 && args[1].rfind("<@&", 0) == 0) {
+                cfg.ping_role_id = resolve_role(args[1]);
               }
-              return raw;
-            };
+              bronx::g_db->save_dead_chat_config(cfg);
+              refresh_monitored_configs();
+              bot.send_message(msg.channel_id, "✅ Dead chat notifier enabled for <#" + cfg.channel_id + ">" +
+                  (cfg.ping_role_id.empty() ? "." : (" (ping: <@&" + cfg.ping_role_id + ">).")));
+              return;
+            }
+            if (args[0].rfind("<@&", 0) == 0 && args[0].back() == '>') {
+              auto existing = bronx::g_db->get_server_dead_chat_configs(msg.server_id);
+              std::string ch_id = existing.empty() ? msg.channel_id : existing[0].channel_id;
+              auto cfg = bronx::g_db->get_dead_chat_config(msg.server_id, ch_id).value_or(bronx::DeadChatConfig{});
+              cfg.server_id = msg.server_id;
+              cfg.channel_id = ch_id;
+              if (cfg.notify_channel_id.empty()) cfg.notify_channel_id = ch_id;
+              cfg.enabled = true;
+              cfg.ping_role_id = resolve_role(args[0]);
+              bronx::g_db->save_dead_chat_config(cfg);
+              refresh_monitored_configs();
+              bot.send_message(msg.channel_id, "✅ Dead chat ping role set to <@&" + cfg.ping_role_id + "> for <#" + cfg.channel_id + ">.");
+              return;
+            }
+
+            std::string sub = first_low;
 
             std::string target_ch = msg.channel_id;
             auto existing = bronx::g_db->get_server_dead_chat_configs(msg.server_id);
