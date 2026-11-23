@@ -30,6 +30,7 @@ private:
     uint64_t last_msg_at = 0;
     uint64_t last_notified_at = 0;
     bool armed = false;
+    uint64_t samples_seen = 0;
     std::deque<std::pair<uint64_t, std::string>> recent_speakers; // (timestamp, user_id)
   };
 
@@ -39,9 +40,9 @@ private:
   std::atomic<bool> running_{false};
   std::thread sweep_thread_;
 
-  // Hawkes decay: 5-minute half-life (beta = ln(2)/300s)
+  // Hawkes decay: 5-minute half-life (beta = ln(2)/300s), stationary branching ratio 0.6
   static constexpr double kBeta = 0.0023104906;
-  static constexpr double kAlpha = 1.0;
+  static constexpr double kAlpha = 0.6 * kBeta;
   static constexpr double kEwmaLr = 0.05;
 
   static int current_bin(uint64_t ts) {
@@ -116,6 +117,7 @@ public:
         st.hawkes_m += kAlpha;
       }
       st.last_msg_at = now;
+      st.samples_seen++;
 
       // Track unique human speakers in the last 15 minutes
       st.recent_speakers.emplace_back(now, e.author.id);
@@ -177,10 +179,12 @@ public:
               continue;
 
             double dt = static_cast<double>(now - st.last_msg_at);
-            if (dt < 120.0) // minimum 2 minutes before considering chat dead
+            if (dt < 600.0) // minimum 10 minutes of silence before considering chat dead
               continue;
 
             double mu = smoothed_mu(st.bins, bin);
+            if (mu <= 0.0 && st.samples_seen < 15) // warm-up guard on brand-new channels
+              continue;
             double integral = mu * dt + (st.hawkes_m / kBeta) * (1.0 - std::exp(-kBeta * dt));
             double p_silence = std::exp(-integral);
 
@@ -330,6 +334,44 @@ public:
                   });
                 });
               });
+              return;
+            }
+
+            if (first_low == "analyze" || first_low == "analyse" || first_low == "stats") {
+              std::string ch_id = (args.size() >= 2) ? extract_ch(args[1]) : msg.channel_id;
+              uint64_t now = static_cast<uint64_t>(std::time(nullptr));
+              int bin = current_bin(now);
+              double mu = 0.0, m_val = 0.0, p_sil = 1.0;
+              uint64_t dt_sec = 0, samples = 0;
+              bool is_armed = false;
+              {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                auto it = states_.find(ch_id);
+                if (it != states_.end()) {
+                  const auto &st = it->second;
+                  mu = smoothed_mu(st.bins, bin);
+                  m_val = st.hawkes_m;
+                  samples = st.samples_seen;
+                  is_armed = st.armed;
+                  if (st.last_msg_at > 0 && now > st.last_msg_at) {
+                    dt_sec = now - st.last_msg_at;
+                    double dt = static_cast<double>(dt_sec);
+                    double integral = mu * dt + (m_val / kBeta) * (1.0 - std::exp(-kBeta * dt));
+                    p_sil = std::exp(-integral);
+                  }
+                }
+              }
+              std::ostringstream out;
+              out << std::fixed << std::setprecision(4)
+                  << "📊 **Dead Chat Analysis for <#" << ch_id << ">**\n\n"
+                  << "| Metric | Value |\n| --- | --- |\n"
+                  << "| Cyclical Bin (`dow*24+hr`) | `" << bin << "` |\n"
+                  << "| Smoothed Baseline (`mu`) | `" << (mu * 60.0) << "` msgs/min |\n"
+                  << "| Hawkes Momentum (`M`) | `" << m_val << "` |\n"
+                  << "| Silence (`dt`) | `" << dt_sec << "s` |\n"
+                  << "| Surprise `P(silence >= dt)` | **" << std::setprecision(2) << (p_sil * 100.0) << "%** |\n"
+                  << "| Armed / Samples | " << (is_armed ? "yes" : "no") << " (" << samples << " msgs) |\n";
+              bot.send_message(msg.channel_id, out.str());
               return;
             }
 
