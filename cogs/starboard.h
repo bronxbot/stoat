@@ -153,7 +153,7 @@ inline std::string resolve_tokens(const std::string &pattern,
 
   // {jump_url}
   std::string jump =
-      "https://app.revolt.chat/channel/" + msg.channel + "/" + msg.id;
+      "https://stoat.chat/channel/" + msg.channel + "/" + msg.id;
   while ((pos = res.find("{jump_url}")) != std::string::npos) {
     res.replace(pos, 10, jump);
   }
@@ -225,8 +225,9 @@ inline std::string resolve_tokens(const std::string &pattern,
   }
 
   // {jump_url}
-  std::string jump =
-      "https://app.revolt.chat/channel/" + msg.channel_id + "/" + msg.id;
+  std::string jump = msg.server_id.empty()
+      ? ("https://stoat.chat/channel/" + msg.channel_id + "/" + msg.id)
+      : ("https://stoat.chat/server/" + msg.server_id + "/channel/" + msg.channel_id + "/" + msg.id);
   while ((pos = res.find("{jump_url}")) != std::string::npos) {
     res.replace(pos, 10, jump);
   }
