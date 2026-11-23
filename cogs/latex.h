@@ -86,6 +86,22 @@ private:
     return png_bytes;
   }
 
+  static std::string resolve_target_id(stoatpp::cluster &bot,
+                                       const std::string &channel_id,
+                                       const std::string &server_id,
+                                       bool allow_rest = false) {
+    if (!server_id.empty()) return server_id;
+    auto ch = bot.get_channel(channel_id);
+    if (ch && ch->server && !ch->server->empty()) return *ch->server;
+    if (allow_rest) {
+      auto res = bot.rest().get_channel(channel_id);
+      if (res.success() && res.body.is_object() && res.body.contains("server") && res.body["server"].is_string()) {
+        return res.body["server"].get<std::string>();
+      }
+    }
+    return channel_id;
+  }
+
   static void send_rendered_latex(stoatpp::cluster &bot,
                                   const std::string &channel_id,
                                   const std::string &formula,
@@ -163,10 +179,11 @@ public:
           std::string toggle_val;
           if (tok1 == "auto") {
             if (tok2.empty()) {
+              std::string target_id = resolve_target_id(bot, msg.channel_id, msg.server_id, true);
               bool enabled = false;
-              if (!msg.server_id.empty()) {
+              {
                 std::lock_guard<std::mutex> lock(cfg_mutex_);
-                enabled = auto_enabled_servers_.count(msg.server_id) > 0;
+                enabled = auto_enabled_servers_.count(target_id) > 0;
               }
               bot.send_message(msg.channel_id, std::string("📐 Auto `$$...$$` rendering is currently **") +
                   (enabled ? "on" : "off") + "**. Use `.texit auto on` or `.texit auto off`.");
@@ -177,21 +194,37 @@ public:
             toggle_val = tok1;
           }
 
-          if ((toggle_val == "on" || toggle_val == "off") && !msg.server_id.empty()) {
-            bot.fetch_member(msg.server_id, msg.author.id, [this, &bot, msg, toggle_val](stoatpp::models::Member member, bool ok) {
-              if (!ok || !is_user_trusted_or_owner(bot, msg.server_id, msg.author.id, member)) {
-                bot.send_message(msg.channel_id, bronx::emj_warning + " You need Manage Server permission to toggle `texit auto`.");
-                return;
-              }
+          if (toggle_val == "on" || toggle_val == "off") {
+            std::string srv_id = resolve_target_id(bot, msg.channel_id, msg.server_id, true);
+            if (srv_id != msg.channel_id) {
+              bot.fetch_member(srv_id, msg.author.id, [this, &bot, msg, srv_id, toggle_val](stoatpp::models::Member member, bool ok) {
+                if (!ok || !is_user_trusted_or_owner(bot, srv_id, msg.author.id, member)) {
+                  bot.send_message(msg.channel_id, bronx::emj_warning + " You need Manage Server permission to toggle `texit auto`.");
+                  return;
+                }
+                std::lock_guard<std::mutex> lock(cfg_mutex_);
+                if (toggle_val == "on") {
+                  auto_enabled_servers_.insert(srv_id);
+                  bot.send_message(msg.channel_id, "✅ Enabled automatic `$$...$$` LaTeX rendering in this server.");
+                } else {
+                  auto_enabled_servers_.erase(srv_id);
+                  bot.send_message(msg.channel_id, "🛑 Disabled automatic `$$...$$` LaTeX rendering in this server.");
+                }
+              });
+            } else {
               std::lock_guard<std::mutex> lock(cfg_mutex_);
               if (toggle_val == "on") {
-                auto_enabled_servers_.insert(msg.server_id);
-                bot.send_message(msg.channel_id, "✅ Enabled automatic `$$...$$` LaTeX rendering in this server.");
+                auto_enabled_servers_.insert(srv_id);
+                bot.send_message(msg.channel_id, "✅ Enabled automatic `$$...$$` LaTeX rendering in this channel.");
               } else {
-                auto_enabled_servers_.erase(msg.server_id);
-                bot.send_message(msg.channel_id, "🛑 Disabled automatic `$$...$$` LaTeX rendering in this server.");
+                auto_enabled_servers_.erase(srv_id);
+                bot.send_message(msg.channel_id, "🛑 Disabled automatic `$$...$$` LaTeX rendering in this channel.");
               }
-            });
+            }
+            return;
+          }
+          if (tok1 == "auto") {
+            bot.send_message(msg.channel_id, "Usage: `.texit auto on` or `.texit auto off`.");
             return;
           }
 
@@ -220,11 +253,10 @@ public:
       if (!def_pfx.empty() && e.content.rfind(def_pfx, 0) == 0)
         return;
 
-      if (e.server_id.empty())
-        return;
+      std::string target_id = resolve_target_id(bot, e.channel_id, e.server_id, false);
       {
         std::lock_guard<std::mutex> lock(cfg_mutex_);
-        if (!auto_enabled_servers_.count(e.server_id))
+        if (!auto_enabled_servers_.count(target_id) && !auto_enabled_servers_.count(e.channel_id))
           return;
       }
 
