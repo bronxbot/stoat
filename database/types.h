@@ -752,6 +752,18 @@ struct WelcomeLeaveConfig {
     bool captcha_kick_on_fail = false;
 };
 
+struct DeadChatConfig {
+    std::string server_id;
+    std::string channel_id;
+    std::string notify_channel_id;
+    std::string ping_role_id;
+    bool enabled = true;
+    double p_threshold = 0.02;
+    int min_speakers = 2;
+    int cooldown_sec = 3600;
+    std::string custom_message;
+};
+
 //  Word Filter
 struct WordFilterGroup {
     int id = 0;

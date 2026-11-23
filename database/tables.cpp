@@ -1684,6 +1684,26 @@ bool Database::init_tables() {
                         "  PRIMARY KEY (user_id, achievement_id)"
                         ")");
 
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS dead_chat_configs ("
+                        "  server_id VARCHAR(64) NOT NULL,"
+                        "  channel_id VARCHAR(64) NOT NULL,"
+                        "  notify_channel_id VARCHAR(64) NOT NULL,"
+                        "  ping_role_id VARCHAR(64) DEFAULT NULL,"
+                        "  enabled TINYINT(1) NOT NULL DEFAULT 1,"
+                        "  p_threshold DOUBLE NOT NULL DEFAULT 0.02,"
+                        "  min_speakers INT NOT NULL DEFAULT 2,"
+                        "  cooldown_sec INT NOT NULL DEFAULT 3600,"
+                        "  custom_message TEXT DEFAULT NULL,"
+                        "  PRIMARY KEY (server_id, channel_id)"
+                        ")");
+
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS channel_hourly_baselines ("
+                        "  channel_id VARCHAR(64) NOT NULL,"
+                        "  bin_idx TINYINT UNSIGNED NOT NULL,"
+                        "  ewma_rate DOUBLE NOT NULL DEFAULT 0.0,"
+                        "  PRIMARY KEY (channel_id, bin_idx)"
+                        ")");
+
     return true;
 }
 

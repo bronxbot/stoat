@@ -1259,6 +1259,18 @@ public:
   ServerSyncSettings get_server_sync_settings(const std::string &local_server_id,
                                               const std::string &remote_platform);
 
+  // Dead Chat Notifier (168-bin Poisson + Hawkes)
+  bool save_dead_chat_config(const DeadChatConfig &cfg);
+  std::optional<DeadChatConfig> get_dead_chat_config(const std::string &server_id,
+                                                     const std::string &channel_id);
+  std::vector<DeadChatConfig> get_all_dead_chat_configs();
+  std::vector<DeadChatConfig> get_server_dead_chat_configs(const std::string &server_id);
+  bool delete_dead_chat_config(const std::string &server_id,
+                               const std::string &channel_id);
+  std::array<double, 168> load_channel_hourly_baselines(const std::string &channel_id);
+  void save_channel_hourly_baselines(const std::string &channel_id,
+                                     const std::array<double, 168> &bins);
+
 private:
   MYSQL *mysql_ = nullptr;
   std::unordered_map<std::string, UserAFK> user_afk_cache_;
