@@ -753,7 +753,7 @@ private:
             }
 
             embed.set_title("Help - Overview (" + std::to_string(categories.size()) + " cogs, " + std::to_string(total_cmds) + " commands)");
-            std::string desc = "Use `⏩` / `⏪` to browse cogs, `◀` / `▶` for pages, `🟦` to jump, or `" + prefix + "help <command|cog>`.\n\n";
+            std::string desc = "Use `⏪` / `⏩` to browse cogs, `◀` / `▶` for pages, `🟦` to jump, or `" + prefix + "help <command|cog>`.\n\n";
             for (size_t i = 0; i < categories.size(); ++i) {
                 const auto& cat = categories[i];
                 desc += "• **" + cat + "** - " + std::to_string(commands_by_cat.at(cat).size()) + " commands\n";
