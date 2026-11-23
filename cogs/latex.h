@@ -124,7 +124,17 @@ public:
         "latex <formula | auto <on|off>>",
         {"<formula...>"},
         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg, const std::vector<std::string> &args) {
-          if (args.empty()) {
+          std::string raw;
+          for (size_t i = 0; i < args.size(); ++i) {
+            if (i > 0) raw += " ";
+            raw += args[i];
+          }
+          // Trim raw
+          size_t fa = raw.find_first_not_of(" \t\r\n");
+          if (fa == std::string::npos) raw.clear();
+          else raw = raw.substr(fa, raw.find_last_not_of(" \t\r\n") - fa + 1);
+
+          if (raw.empty()) {
             bot.send_message(msg.channel_id,
                 "📐 **LaTeX / TeXit**\n"
                 "• `.latex <formula>` - Render any LaTeX expression\n"
@@ -132,11 +142,27 @@ public:
             return;
           }
 
-          std::string first = args[0];
-          std::transform(first.begin(), first.end(), first.begin(), ::tolower);
+          // Split first two tokens from raw (since single <formula...> param joins words into args[0])
+          std::string low_raw = raw;
+          std::transform(low_raw.begin(), low_raw.end(), low_raw.begin(), ::tolower);
+          std::string tok1, tok2;
+          {
+            size_t sp = low_raw.find_first_of(" \t\r\n");
+            if (sp == std::string::npos) {
+              tok1 = low_raw;
+            } else {
+              tok1 = low_raw.substr(0, sp);
+              size_t sp2 = low_raw.find_first_not_of(" \t\r\n", sp);
+              if (sp2 != std::string::npos) {
+                size_t sp3 = low_raw.find_first_of(" \t\r\n", sp2);
+                tok2 = (sp3 == std::string::npos) ? low_raw.substr(sp2) : low_raw.substr(sp2, sp3 - sp2);
+              }
+            }
+          }
+
           std::string toggle_val;
-          if (first == "auto") {
-            if (args.size() < 2) {
+          if (tok1 == "auto") {
+            if (tok2.empty()) {
               bool enabled = false;
               if (!msg.server_id.empty()) {
                 std::lock_guard<std::mutex> lock(cfg_mutex_);
@@ -146,10 +172,9 @@ public:
                   (enabled ? "on" : "off") + "**. Use `.texit auto on` or `.texit auto off`.");
               return;
             }
-            toggle_val = args[1];
-            std::transform(toggle_val.begin(), toggle_val.end(), toggle_val.begin(), ::tolower);
-          } else if ((first == "on" || first == "off") && args.size() == 1) {
-            toggle_val = first;
+            toggle_val = tok2;
+          } else if ((tok1 == "on" || tok1 == "off") && tok2.empty()) {
+            toggle_val = tok1;
           }
 
           if ((toggle_val == "on" || toggle_val == "off") && !msg.server_id.empty()) {
@@ -170,11 +195,6 @@ public:
             return;
           }
 
-          std::string raw;
-          for (size_t i = 0; i < args.size(); ++i) {
-            if (i > 0) raw += " ";
-            raw += args[i];
-          }
           std::string formula = strip_tex_wrappers(raw);
           if (formula.empty()) {
             bot.send_message(msg.channel_id, bronx::emj_no + " Please provide a LaTeX formula.");
