@@ -1,19 +1,20 @@
+#include "emojis.h"
 #include "stoatpp/bot_module.h"
 #include "stoatpp/cluster.h"
 #include "stoatpp/models/permissions.h"
 #include "stoatpp/utils/ulid.h"
 #include <algorithm>
+#include <arpa/inet.h>
 #include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <ifaddrs.h>
 #include <iostream>
 #include <map>
 #include <mutex>
-#include <arpa/inet.h>
-#include <ifaddrs.h>
 #include <netinet/in.h>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -24,16 +25,17 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include "emojis.h"
 
 static std::string get_primary_host_ip() {
   struct ifaddrs *ifaddr = nullptr;
-  if (getifaddrs(&ifaddr) == -1) return "127.0.0.1";
+  if (getifaddrs(&ifaddr) == -1)
+    return "127.0.0.1";
 
   std::string found_ip = "";
   for (struct ifaddrs *ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-    if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
-    
+    if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+      continue;
+
     char host[INET_ADDRSTRLEN];
     struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
     inet_ntop(AF_INET, &(sa->sin_addr), host, INET_ADDRSTRLEN);
@@ -41,11 +43,13 @@ static std::string get_primary_host_ip() {
 
     // Skip loopback (127.x.x.x)
     if (ip != "127.0.0.1" && ip.find("127.") != 0) {
-      if (ip.find("192.168.") == 0 || ip.find("100.") == 0 || ip.find("10.") == 0) {
+      if (ip.find("192.168.") == 0 || ip.find("100.") == 0 ||
+          ip.find("10.") == 0) {
         found_ip = ip;
         break;
       }
-      if (found_ip.empty()) found_ip = ip;
+      if (found_ip.empty())
+        found_ip = ip;
     }
   }
   freeifaddrs(ifaddr);
@@ -68,32 +72,36 @@ static void handle_shutdown_signal(int sig) {
 #include "cogs/antiraid.h"
 #include "cogs/applications.h"
 #include "cogs/auto.h"
-#include "cogs/blackjack.h"
 #include "cogs/backup.h"
+#include "cogs/blackjack.h"
 #include "cogs/bridge.h"
 #include "cogs/captcha.h"
 #include "cogs/command_config.h"
 #include "cogs/counting.h"
+#include "cogs/customcmds.h"
+#include "cogs/deadchat.h"
 #include "cogs/economy.h"
 #include "cogs/emoji.h"
 #include "cogs/filter.h"
 #include "cogs/fishing.h"
 #include "cogs/gambling.h"
-#include "cogs/rpg.h"
 #include "cogs/games.h"
+#include "cogs/general.h"
 #include "cogs/geoguessr.h"
 #include "cogs/giveaway.h"
-#include "cogs/general.h"
 #include "cogs/help.h"
 #include "cogs/history.h"
 #include "cogs/honeypot.h"
-#include "cogs/multispam.h"
+#include "cogs/imageboard.h"
+#include "cogs/language.h"
 #include "cogs/lastfm.h"
+#include "cogs/latex.h"
 #include "cogs/leveling.h"
 #include "cogs/logging.h"
 #include "cogs/masquerade.h"
 #include "cogs/media.h"
 #include "cogs/moderation.h"
+#include "cogs/multispam.h"
 #include "cogs/owner.h"
 #include "cogs/prefix.h"
 #include "cogs/qte.h"
@@ -101,6 +109,7 @@ static void handle_shutdown_signal(int sig) {
 #include "cogs/reminders.h"
 #include "cogs/roblox.h"
 #include "cogs/roles.h"
+#include "cogs/rpg.h"
 #include "cogs/rss.h"
 #include "cogs/serverlist.h"
 #include "cogs/setup.h"
@@ -110,15 +119,11 @@ static void handle_shutdown_signal(int sig) {
 #include "cogs/stats.h"
 #include "cogs/tickets.h"
 #include "cogs/timezone.h"
-#include "cogs/language.h"
 #include "cogs/tupper.h"
-#include "i18n.h"
 #include "cogs/users.h"
-#include "cogs/welcome_leave.h"
 #include "cogs/voice.h"
-#include "cogs/imageboard.h"
-#include "cogs/customcmds.h"
-
+#include "cogs/welcome_leave.h"
+#include "i18n.h"
 
 // Simple self-contained helper to load environment variables from a .env file
 void load_env(const std::string &filepath = ".env") {
@@ -154,7 +159,8 @@ void load_env(const std::string &filepath = ".env") {
       value = value.substr(1, value.size() - 2);
     }
 
-    // 0 = do not overwrite existing environment variables (allows container -e overrides)
+    // 0 = do not overwrite existing environment variables (allows container -e
+    // overrides)
     setenv(key.c_str(), value.c_str(), 0);
   }
   std::cout << "[bronx env] successfully loaded variables from " << path_used
@@ -376,7 +382,8 @@ void start_reload_server() {
               if (module == "autoreact" || module == "all") {
                 bronx::g_db->reload_autoreacts(server_id);
               }
-              if (module == "commands" || module == "customcmds" || module == "all") {
+              if (module == "commands" || module == "customcmds" ||
+                  module == "all") {
                 bronx::g_db->reload_disabled_items(server_id);
                 bronx::g_db->reload_custom_commands(server_id);
               }
@@ -410,8 +417,9 @@ int main(int argc, char *argv[]) {
 
   // Record start time and read version stamp
   g_start_time = std::chrono::steady_clock::now();
-  if (const char* ver_env = std::getenv("BOT_VERSION")) {
-    if (std::string(ver_env) != "") g_bot_version = ver_env;
+  if (const char *ver_env = std::getenv("BOT_VERSION")) {
+    if (std::string(ver_env) != "")
+      g_bot_version = ver_env;
   }
   std::cout << "[bronx] version: " << g_bot_version << "\n";
 
@@ -451,15 +459,21 @@ int main(int argc, char *argv[]) {
 
   // If running inside a container (Podman / Docker) and db_host is local,
   // automatically resolution host IP via local interfaces or fallback
-  if (db_host == "127.0.0.1" || db_host == "localhost" || db_host == "host.containers.internal") {
-    if (access("/run/.containerenv", F_OK) == 0 || access("/.dockerenv", F_OK) == 0) {
+  if (db_host == "127.0.0.1" || db_host == "localhost" ||
+      db_host == "host.containers.internal") {
+    if (access("/run/.containerenv", F_OK) == 0 ||
+        access("/.dockerenv", F_OK) == 0) {
       std::string detected_ip = get_primary_host_ip();
       if (detected_ip != "127.0.0.1") {
         db_host = detected_ip;
-        std::cout << "[bronx db] container environment detected, resolved host IP to " << db_host << "\n";
+        std::cout
+            << "[bronx db] container environment detected, resolved host IP to "
+            << db_host << "\n";
       } else {
         db_host = "host.containers.internal";
-        std::cout << "[bronx db] container environment detected, set DB host to " << db_host << "\n";
+        std::cout
+            << "[bronx db] container environment detected, set DB host to "
+            << db_host << "\n";
       }
     }
   }
@@ -518,7 +532,8 @@ int main(int argc, char *argv[]) {
   cfg.enable_default_help = false;
   cfg.dispatch_commands_on_edit = true;
   cfg.case_insensitive_commands = true;
-  cfg.ws_ping_interval_ms = 3000;  // server kills idle connections at ~5s; ping every 3s
+  cfg.ws_ping_interval_ms =
+      3000; // server kills idle connections at ~5s; ping every 3s
 
   cfg.command_prefix = ".";
   if (const char *pfx = std::getenv("COMMAND_PREFIX")) {
@@ -730,70 +745,86 @@ int main(int argc, char *argv[]) {
   bot.use(std::make_unique<bronx::cogs::VoiceModule>());
   bot.use(std::make_unique<bronx::cogs::ImageBoardModule>());
   bot.use(std::make_unique<bronx::cogs::CustomCmdsModule>());
+  bot.use(std::make_unique<bronx::cogs::DeadChatModule>());
+  bot.use(std::make_unique<bronx::cogs::LatexModule>());
 
+  // ── Built-in: ping
+  // ──────────────────────────────────────────────────────────
+  bot.register_command(
+      {"ping",
+       {"pong", "latency"},
+       "Check the bot's response time and version.",
+       "",
+       {},
+       [](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+          const std::vector<std::string> &) {
+         auto t0 = std::chrono::steady_clock::now();
+         bot.send_message(
+             msg.channel_id, "🏓 pinging...",
+             [&bot, msg, t0](stoatpp::models::Message sent, bool ok) {
+               if (!ok)
+                 return;
+               auto t1 = std::chrono::steady_clock::now();
+               int64_t rtt_ms =
+                   std::chrono::duration_cast<std::chrono::milliseconds>(t1 -
+                                                                         t0)
+                       .count();
 
-  // ── Built-in: ping ──────────────────────────────────────────────────────────
-  bot.register_command({
-    "ping",
-    {"pong", "latency"},
-    "Check the bot's response time and version.",
-    "",
-    {},
-    [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>&) {
-      auto t0 = std::chrono::steady_clock::now();
-      bot.send_message(msg.channel_id, "🏓 pinging...",
-        [&bot, msg, t0](stoatpp::models::Message sent, bool ok) {
-          if (!ok) return;
-          auto t1 = std::chrono::steady_clock::now();
-          int64_t rtt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+               stoatpp::models::MessagePayload payload;
+               nlohmann::json embed = nlohmann::json::object();
+               embed["title"] = "🏓 Pong!";
+               embed["colour"] = "#a78bfa";
+               embed["description"] = "• **Latency:** `" +
+                                      std::to_string(rtt_ms) +
+                                      " ms`\n"
+                                      "• **Version:** `" +
+                                      g_bot_version + "`";
+               payload.embeds.push_back(embed);
+               bot.edit_message(msg.channel_id, sent.id, payload);
+             });
+       },
+       "Utility"});
 
-          stoatpp::models::MessagePayload payload;
-          nlohmann::json embed = nlohmann::json::object();
-          embed["title"] = "🏓 Pong!";
-          embed["colour"] = "#a78bfa";
-          embed["description"] =
-            "• **Latency:** `" + std::to_string(rtt_ms) + " ms`\n"
-            "• **Version:** `" + g_bot_version + "`";
-          payload.embeds.push_back(embed);
-          bot.edit_message(msg.channel_id, sent.id, payload);
-        });
-    },
-    "Utility"
-  });
+  // ── Built-in: uptime
+  // ────────────────────────────────────────────────────────
+  bot.register_command(
+      {"uptime",
+       {},
+       "Show how long the bot has been running and its version.",
+       "",
+       {},
+       [](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+          const std::vector<std::string> &) {
+         auto now = std::chrono::steady_clock::now();
+         int64_t total_secs = std::chrono::duration_cast<std::chrono::seconds>(
+                                  now - g_start_time)
+                                  .count();
+         int64_t days = total_secs / 86400;
+         int64_t hours = (total_secs % 86400) / 3600;
+         int64_t mins = (total_secs % 3600) / 60;
+         int64_t secs = total_secs % 60;
 
-  // ── Built-in: uptime ────────────────────────────────────────────────────────
-  bot.register_command({
-    "uptime",
-    {},
-    "Show how long the bot has been running and its version.",
-    "",
-    {},
-    [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>&) {
-      auto now = std::chrono::steady_clock::now();
-      int64_t total_secs = std::chrono::duration_cast<std::chrono::seconds>(now - g_start_time).count();
-      int64_t days  = total_secs / 86400;
-      int64_t hours = (total_secs % 86400) / 3600;
-      int64_t mins  = (total_secs % 3600)  / 60;
-      int64_t secs  = total_secs % 60;
+         std::string uptime_str;
+         if (days)
+           uptime_str += std::to_string(days) + "d ";
+         if (hours)
+           uptime_str += std::to_string(hours) + "h ";
+         if (mins)
+           uptime_str += std::to_string(mins) + "m ";
+         uptime_str += std::to_string(secs) + "s";
 
-      std::string uptime_str;
-      if (days)  uptime_str += std::to_string(days)  + "d ";
-      if (hours) uptime_str += std::to_string(hours) + "h ";
-      if (mins)  uptime_str += std::to_string(mins)  + "m ";
-      uptime_str += std::to_string(secs) + "s";
-
-      stoatpp::models::MessagePayload payload;
-      nlohmann::json embed = nlohmann::json::object();
-      embed["title"] = "⏱️ Uptime";
-      embed["colour"] = "#34d399";
-      embed["description"] =
-        "• **Running for:** `" + uptime_str + "`\n"
-        "• **Version:** `" + g_bot_version + "`";
-      payload.embeds.push_back(embed);
-      bot.send_message(msg.channel_id, payload);
-    },
-    "Utility"
-  });
+         stoatpp::models::MessagePayload payload;
+         nlohmann::json embed = nlohmann::json::object();
+         embed["title"] = "⏱️ Uptime";
+         embed["colour"] = "#34d399";
+         embed["description"] = "• **Running for:** `" + uptime_str +
+                                "`\n"
+                                "• **Version:** `" +
+                                g_bot_version + "`";
+         payload.embeds.push_back(embed);
+         bot.send_message(msg.channel_id, payload);
+       },
+       "Utility"});
 
   bot.on_ready([&bot, staging](const stoatpp::events::Ready &e) {
     g_bot_ready = true;
@@ -817,24 +848,25 @@ int main(int argc, char *argv[]) {
 
     std::string status_text =
         "serving " + std::to_string(e.servers.size()) + " servers";
-    bot.update_status(status_text, staging ? "Focus" : "Online", [](bool success) {
-      if (success) {
-        std::cout
-            << "\033[1;36m[bronx]\033[0m successfully set presence status.\n";
-      } else {
-        std::cout
-            << "\033[1;31m[bronx]\033[0m failed to set presence status.\n";
-      }
-    });
+    bot.update_status(
+        status_text, staging ? "Focus" : "Online", [](bool success) {
+          if (success) {
+            std::cout << "\033[1;36m[bronx]\033[0m successfully set presence "
+                         "status.\n";
+          } else {
+            std::cout
+                << "\033[1;31m[bronx]\033[0m failed to set presence status.\n";
+          }
+        });
 
     // Shifting status timer (runs every 90 seconds).
     // Cancel any previous timer from an earlier on_ready (reconnect scenario).
     static std::atomic<uint64_t> status_timer_id{0};
     {
-        uint64_t old_id = status_timer_id.exchange(0);
-        if (old_id != 0) {
-            bot.stop_timer(old_id);
-        }
+      uint64_t old_id = status_timer_id.exchange(0);
+      if (old_id != 0) {
+        bot.stop_timer(old_id);
+      }
     }
     uint64_t new_timer_id = bot.start_timer(
         [&bot, staging](stoatpp::timer t) {
@@ -927,12 +959,15 @@ int main(int argc, char *argv[]) {
 
     auto now = std::chrono::steady_clock::now();
     if (s_last_cache_time.time_since_epoch().count() != 0 &&
-        std::chrono::duration_cast<std::chrono::hours>(now - s_last_cache_time).count() < 6) {
-      std::cout << "\033[1;35m[bronx cache]\033[0m member cache already populated within 6h, skipping.\n";
+        std::chrono::duration_cast<std::chrono::hours>(now - s_last_cache_time)
+                .count() < 6) {
+      std::cout << "\033[1;35m[bronx cache]\033[0m member cache already "
+                   "populated within 6h, skipping.\n";
       return;
     }
     if (s_caching_in_progress.exchange(true)) {
-      std::cout << "\033[1;35m[bronx cache]\033[0m member cache fetch already running in background, skipping.\n";
+      std::cout << "\033[1;35m[bronx cache]\033[0m member cache fetch already "
+                   "running in background, skipping.\n";
       return;
     }
 
@@ -1189,7 +1224,8 @@ int main(int argc, char *argv[]) {
           }
 
           // 4. Check user opt-out
-          if (!skip_xp && bronx::g_db->is_opted_out(msg.author.id, bronx::OPTOUT_LEVELING)) {
+          if (!skip_xp && bronx::g_db->is_opted_out(msg.author.id,
+                                                    bronx::OPTOUT_LEVELING)) {
             skip_xp = true;
           }
 
@@ -1679,8 +1715,10 @@ int main(int argc, char *argv[]) {
                   dm_res.body["_id"].template get<std::string>();
               bot.send_message(
                   dm_channel_id,
-                  "" + bronx::emj_warning + " **Permission Error**: Bronx is missing the `SendMessage` "
-                  "permission in <#" +
+                  "" + bronx::emj_warning +
+                      " **Permission Error**: Bronx is missing the "
+                      "`SendMessage` "
+                      "permission in <#" +
                       channel_id +
                       "> so your command response could not be sent.");
             }
@@ -1707,24 +1745,29 @@ int main(int argc, char *argv[]) {
           std::string user_msg;
           if (error_msg == "NotElevated") {
             user_msg =
-                "" + bronx::emj_warning + " I don't have a high enough role to perform this action. "
+                "" + bronx::emj_warning +
+                " I don't have a high enough role to perform this action. "
                 "Please move my role above the target user's roles.";
           } else if (error_msg == "Forbidden" || status_code == 403) {
-            user_msg = "" + bronx::emj_warning + " I don't have permission to perform this action (" +
+            user_msg = "" + bronx::emj_warning +
+                       " I don't have permission to perform this action (" +
                        std::to_string(status_code) + ": " + error_msg + ").";
           } else if (error_msg == "NotFound" || status_code == 404) {
-            user_msg = "" + bronx::emj_warning + " The target resource was not found (it may have been "
+            user_msg = "" + bronx::emj_warning +
+                       " The target resource was not found (it may have been "
                        "deleted).";
           } else if (status_code == 400 &&
                      path.find("/reactions/") != std::string::npos) {
             user_msg =
-                "" + bronx::emj_warning + " The specified emoji is invalid or cannot be used here.";
+                "" + bronx::emj_warning +
+                " The specified emoji is invalid or cannot be used here.";
           } else if (status_code >= 500) {
-            user_msg = "" + bronx::emj_warning + " The server encountered an internal error. Please try "
+            user_msg = "" + bronx::emj_warning +
+                       " The server encountered an internal error. Please try "
                        "again later.";
           } else if (status_code >= 400) {
-            user_msg = "" + bronx::emj_warning + " Request failed (" + std::to_string(status_code) +
-                       ": " + error_msg + ").";
+            user_msg = "" + bronx::emj_warning + " Request failed (" +
+                       std::to_string(status_code) + ": " + error_msg + ").";
           }
 
           if (!user_msg.empty()) {
@@ -1960,9 +2003,10 @@ int main(int argc, char *argv[]) {
               (std::find(whitelist_channels.begin(), whitelist_channels.end(),
                          msg.channel_id) != whitelist_channels.end());
           if (!channel_ok) {
-            bot.send_message(
-                msg.channel_id,
-                "" + bronx::emj_warning + " This command/module is allowed only in specific channels.");
+            bot.send_message(msg.channel_id,
+                             "" + bronx::emj_warning +
+                                 " This command/module is allowed only in "
+                                 "specific channels.");
             return stoatpp::CommandRunResult::Deny;
           }
         }
@@ -1991,8 +2035,9 @@ int main(int argc, char *argv[]) {
           if (!member_ok) {
             bot.send_message(
                 msg.channel_id,
-                "" + bronx::emj_warning + " This command/module is whitelisted and not accessible by "
-                "your current roles or permissions.");
+                "" + bronx::emj_warning +
+                    " This command/module is whitelisted and not accessible by "
+                    "your current roles or permissions.");
             return stoatpp::CommandRunResult::Deny;
           }
         }
@@ -2025,8 +2070,9 @@ int main(int argc, char *argv[]) {
 
         if (matches_blacklist) {
           bot.send_message(msg.channel_id,
-                           "" + bronx::emj_warning + " This command/module has been blacklisted for "
-                           "your current roles, permissions, or channel.");
+                           "" + bronx::emj_warning +
+                               " This command/module has been blacklisted for "
+                               "your current roles, permissions, or channel.");
           return stoatpp::CommandRunResult::Deny;
         }
       }
