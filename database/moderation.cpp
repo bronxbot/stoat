@@ -65,18 +65,26 @@ namespace bronx {
         wl.welcome_dm_embed_json.empty()
             ? "NULL"
             : "'" + escape_string(wl.welcome_dm_embed_json) + "'";
+    std::string cap_mode = "'" + escape_string(wl.captcha_mode.empty() ? "off" : wl.captcha_mode) + "'";
+    std::string cap_chan = wl.captcha_channel_id.empty() ? "NULL" : "'" + escape_string(wl.captcha_channel_id) + "'";
+    std::string cap_role = wl.captcha_role_id.empty() ? "NULL" : "'" + escape_string(wl.captcha_role_id) + "'";
+    std::string cap_timeout = std::to_string(std::max(30, wl.captcha_timeout_sec));
+    std::string cap_kick = wl.captcha_kick_on_fail ? "1" : "0";
 
     std::string query =
         "INSERT INTO welcome_leave_configs (server_id, welcome_channel_id, "
         "welcome_type, welcome_content, welcome_embed, "
         "leave_channel_id, leave_type, leave_content, leave_embed, "
         "autorole_role_id, "
-        "welcome_dm_type, welcome_dm_content, welcome_dm_embed) VALUES ("
+        "welcome_dm_type, welcome_dm_content, welcome_dm_embed, "
+        "captcha_mode, captcha_channel_id, captcha_role_id, "
+        "captcha_timeout_sec, captcha_kick_on_fail) VALUES ("
         "'" +
         escape_string(wl.server_id) + "', " + w_channel + ", " + w_type + ", " +
         w_content + ", " + w_embed + ", " + l_channel + ", " + l_type + ", " +
         l_content + ", " + l_embed + ", " + autorole + ", " + w_dm_type + ", " +
-        w_dm_content + ", " + w_dm_embed +
+        w_dm_content + ", " + w_dm_embed + ", " + cap_mode + ", " + cap_chan +
+        ", " + cap_role + ", " + cap_timeout + ", " + cap_kick +
         ") "
         "ON DUPLICATE KEY UPDATE "
         "welcome_channel_id=" +
@@ -113,7 +121,12 @@ namespace bronx {
         w_dm_content +
         ", "
         "welcome_dm_embed=" +
-        w_dm_embed;
+        w_dm_embed +
+        ", captcha_mode=" + cap_mode +
+        ", captcha_channel_id=" + cap_chan +
+        ", captcha_role_id=" + cap_role +
+        ", captcha_timeout_sec=" + cap_timeout +
+        ", captcha_kick_on_fail=" + cap_kick;
 
     if (mysql_query(mysql_, query.c_str())) {
       std::cerr << "[bronx db] failed to save welcome/leave config: "
@@ -1697,7 +1710,9 @@ namespace bronx {
     if (!mysql_) return false;
     std::string q = "SELECT server_id, welcome_channel_id, welcome_type, welcome_content, welcome_embed, "
                     "leave_channel_id, leave_type, leave_content, leave_embed, autorole_role_id, "
-                    "welcome_dm_type, welcome_dm_content, welcome_dm_embed FROM welcome_leave_configs WHERE server_id = '" + escape_string(server_id) + "'";
+                    "welcome_dm_type, welcome_dm_content, welcome_dm_embed, captcha_mode, "
+                    "captcha_channel_id, captcha_role_id, captcha_timeout_sec, captcha_kick_on_fail "
+                    "FROM welcome_leave_configs WHERE server_id = '" + escape_string(server_id) + "'";
     if (mysql_query(mysql_, q.c_str()) == 0) {
       MYSQL_RES *res = mysql_store_result(mysql_);
       if (res) {
@@ -1718,6 +1733,11 @@ namespace bronx {
           wl.welcome_dm_type = row[10] ? row[10] : "none";
           wl.welcome_dm_content = row[11] ? row[11] : "";
           wl.welcome_dm_embed_json = row[12] ? row[12] : "";
+          wl.captcha_mode = row[13] ? row[13] : "off";
+          wl.captcha_channel_id = row[14] ? row[14] : "";
+          wl.captcha_role_id = row[15] ? row[15] : "";
+          wl.captcha_timeout_sec = row[16] ? std::stoi(row[16]) : 120;
+          wl.captcha_kick_on_fail = row[17] && std::stoi(row[17]) != 0;
           wl_cache_[server_id] = wl;
         } else {
           wl_cache_.erase(server_id);

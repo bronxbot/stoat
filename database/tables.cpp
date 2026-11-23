@@ -224,6 +224,18 @@ bool Database::init_tables() {
     mysql_query(mysql_, "ALTER TABLE welcome_leave_configs ADD COLUMN IF NOT "
                         "EXISTS welcome_dm_embed JSON DEFAULT NULL");
 
+    // Migration: Ensure Join CAPTCHA columns exist
+    mysql_query(mysql_, "ALTER TABLE welcome_leave_configs ADD COLUMN IF NOT EXISTS "
+                        "captcha_mode VARCHAR(16) NOT NULL DEFAULT 'off'");
+    mysql_query(mysql_, "ALTER TABLE welcome_leave_configs ADD COLUMN IF NOT EXISTS "
+                        "captcha_channel_id VARCHAR(30) DEFAULT NULL");
+    mysql_query(mysql_, "ALTER TABLE welcome_leave_configs ADD COLUMN IF NOT EXISTS "
+                        "captcha_role_id VARCHAR(30) DEFAULT NULL");
+    mysql_query(mysql_, "ALTER TABLE welcome_leave_configs ADD COLUMN IF NOT EXISTS "
+                        "captcha_timeout_sec INT NOT NULL DEFAULT 120");
+    mysql_query(mysql_, "ALTER TABLE welcome_leave_configs ADD COLUMN IF NOT EXISTS "
+                        "captcha_kick_on_fail TINYINT(1) NOT NULL DEFAULT 0");
+
     // Create Table logging_configs
     std::string create_log_configs =
         "CREATE TABLE IF NOT EXISTS logging_configs ("

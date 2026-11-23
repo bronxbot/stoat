@@ -120,7 +120,8 @@ bool Database::init_cache() {
         "SELECT server_id, welcome_channel_id, welcome_type, welcome_content, "
         "welcome_embed, leave_channel_id, leave_type, leave_content, "
         "leave_embed, autorole_role_id, welcome_dm_type, welcome_dm_content, "
-        "welcome_dm_embed FROM welcome_leave_configs";
+        "welcome_dm_embed, captcha_mode, captcha_channel_id, captcha_role_id, "
+        "captcha_timeout_sec, captcha_kick_on_fail FROM welcome_leave_configs";
     if (mysql_query(mysql_, select_wl.c_str()) == 0) {
       MYSQL_RES *wl_res = mysql_store_result(mysql_);
       if (wl_res) {
@@ -141,6 +142,11 @@ bool Database::init_cache() {
           wl.welcome_dm_type = row[10] ? row[10] : "none";
           if (row[11]) wl.welcome_dm_content = row[11];
           if (row[12]) wl.welcome_dm_embed_json = row[12];
+          wl.captcha_mode = row[13] ? row[13] : "off";
+          if (row[14]) wl.captcha_channel_id = row[14];
+          if (row[15]) wl.captcha_role_id = row[15];
+          wl.captcha_timeout_sec = row[16] ? std::stoi(row[16]) : 120;
+          wl.captcha_kick_on_fail = row[17] && std::stoi(row[17]) != 0;
           wl_cache_[wl.server_id] = wl;
         }
         mysql_free_result(wl_res);

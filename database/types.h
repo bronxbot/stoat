@@ -745,6 +745,11 @@ struct WelcomeLeaveConfig {
     std::string welcome_dm_type = "none"; // "none", "text", or "embed"
     std::string welcome_dm_content;
     std::string welcome_dm_embed_json;
+    std::string captcha_mode = "off";     // "off", "dm", or "channel"
+    std::string captcha_channel_id;       // channel for "channel" mode
+    std::string captcha_role_id;          // role granted upon solving (or autorole_role_id fallback)
+    int captcha_timeout_sec = 120;        // seconds to solve
+    bool captcha_kick_on_fail = false;
 };
 
 //  Word Filter

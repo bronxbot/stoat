@@ -1,15 +1,33 @@
 #pragma once
 #include "stoatpp/bot_module.h"
+#include "captcha.h"
 #include "helpers.h"
 #include "command_config.h"
 #include <sstream>
 #include <algorithm>
+#include <chrono>
+#include <mutex>
 #include <random>
+#include <unordered_map>
 
 namespace bronx::cogs {
 
 class WelcomeLeaveModule : public stoatpp::bot_module {
 private:
+    struct PendingJoinCaptcha {
+        std::string server_id;
+        std::string user_id;
+        std::string channel_id;
+        std::string code;
+        std::string role_id;
+        bool kick_on_fail = false;
+        int attempts_left = 3;
+        std::chrono::steady_clock::time_point expires_at;
+    };
+
+    inline static std::mutex captcha_mutex_;
+    inline static std::unordered_map<std::string, PendingJoinCaptcha> pending_captchas_;
+
     static void send_verbose_test_message(stoatpp::cluster& bot, const std::string& target_channel, const stoatpp::models::MessagePayload& payload, const std::string& cmd_channel, const std::string& success_msg, const std::string& error_prefix) {
         std::thread([&bot, target_channel, payload, cmd_channel, success_msg, error_prefix]() {
             auto res = bot.rest().create_message(target_channel, payload);
@@ -176,11 +194,122 @@ public:
                                                      "• `" + pfx + "welcome dmmessage <text...>` - Set welcome DM message body.\n"
                                                      "• `" + pfx + "welcome dmedit <key:val...>` - Customize welcome DM embed fields.\n"
                                                      "• `" + pfx + "welcome dmjson <raw_json>` - Import welcome DM embed JSON.\n"
-                                                     "• `" + pfx + "welcome dmtest` - Send a simulated welcome DM test to yourself.");
+                                                     "• `" + pfx + "welcome dmtest` - Send a simulated welcome DM test to yourself.\n"
+                                                     "• `" + pfx + "welcome captcha` - Configure join CAPTCHA verification (DM or channel).");
                     return;
                 }
 
                 std::string subcommand = args[0];
+
+                if (subcommand == "captcha") {
+                    auto cfg = g_db->get_welcome_leave_config(msg.server_id).value_or(bronx::WelcomeLeaveConfig{});
+                    cfg.server_id = msg.server_id;
+                    if (args.size() < 2) {
+                        std::string ch_disp = cfg.captcha_channel_id.empty() ? "not set" : ("<#" + cfg.captcha_channel_id + ">");
+                        std::string role_disp = cfg.captcha_role_id.empty()
+                            ? (cfg.autorole_role_id.empty() ? "none" : ("autorole (`" + cfg.autorole_role_id + "`)"))
+                            : ("`" + cfg.captcha_role_id + "`");
+                        std::string out = "🛡️ **Join CAPTCHA Configuration**\n\n"
+                                          "| Setting | Value |\n| --- | --- |\n"
+                                          "| Mode | `" + cfg.captcha_mode + "` (`off`, `dm`, `channel`) |\n"
+                                          "| Channel | " + ch_disp + " |\n"
+                                          "| Verified Role | " + role_disp + " |\n"
+                                          "| Timeout | " + std::to_string(cfg.captcha_timeout_sec) + "s |\n"
+                                          "| Kick on Fail | " + std::string(cfg.captcha_kick_on_fail ? "on" : "off") + " |\n\n"
+                                          "Usage:\n"
+                                          "• `" + pfx + "welcome captcha mode <off|dm|channel>`\n"
+                                          "• `" + pfx + "welcome captcha channel <#channel|none>`\n"
+                                          "• `" + pfx + "welcome captcha role <role|none>`\n"
+                                          "• `" + pfx + "welcome captcha timeout <30-600>`\n"
+                                          "• `" + pfx + "welcome captcha kick <on|off>`";
+                        bot.send_message(msg.channel_id, out);
+                        return;
+                    }
+
+                    std::string opt = args[1];
+                    std::transform(opt.begin(), opt.end(), opt.begin(), ::tolower);
+                    if (opt == "mode" && args.size() >= 3) {
+                        std::string m = args[2];
+                        std::transform(m.begin(), m.end(), m.begin(), ::tolower);
+                        if (m != "off" && m != "dm" && m != "channel") {
+                            bot.send_message(msg.channel_id, bronx::emj_no + " Mode must be `off`, `dm`, or `channel`.");
+                            return;
+                        }
+                        cfg.captcha_mode = m;
+                        g_db->save_welcome_leave_config(cfg);
+                        bot.send_message(msg.channel_id, "✅ Join CAPTCHA mode set to `" + m + "`.");
+                    } else if (opt == "channel" && args.size() >= 3) {
+                        std::string val = args[2];
+                        if (val == "none" || val == "off") {
+                            cfg.captcha_channel_id.clear();
+                        } else {
+                            if (val.size() > 3 && val.rfind("<#", 0) == 0 && val.back() == '>') {
+                                val = val.substr(2, val.size() - 3);
+                            }
+                            cfg.captcha_channel_id = val;
+                        }
+                        g_db->save_welcome_leave_config(cfg);
+                        bot.send_message(msg.channel_id, cfg.captcha_channel_id.empty()
+                            ? "✅ Join CAPTCHA channel cleared."
+                            : "✅ Join CAPTCHA channel set to <#" + cfg.captcha_channel_id + ">.");
+                    } else if (opt == "role" && args.size() >= 3) {
+                        std::string q;
+                        for (size_t i = 2; i < args.size(); ++i) {
+                            if (i > 2) q += " ";
+                            q += args[i];
+                        }
+                        if (q == "none" || q == "off") {
+                            cfg.captcha_role_id.clear();
+                            g_db->save_welcome_leave_config(cfg);
+                            bot.send_message(msg.channel_id, "✅ Join CAPTCHA verified role cleared (will fall back to autorole if set).");
+                            return;
+                        }
+                        auto srv_opt = bot.get_server(msg.server_id);
+                        std::string found_id;
+                        std::string found_name;
+                        std::string clean_q = q;
+                        if (clean_q.size() > 3 && clean_q.rfind("<@&", 0) == 0 && clean_q.back() == '>') {
+                            clean_q = clean_q.substr(3, clean_q.size() - 4);
+                        }
+                        std::string low_q = clean_q;
+                        std::transform(low_q.begin(), low_q.end(), low_q.begin(), ::tolower);
+                        if (srv_opt) {
+                            for (const auto& r : srv_opt->roles) {
+                                std::string low_r = r.name;
+                                std::transform(low_r.begin(), low_r.end(), low_r.begin(), ::tolower);
+                                if (r.id == clean_q || low_r == low_q) {
+                                    found_id = r.id;
+                                    found_name = r.name;
+                                    break;
+                                }
+                            }
+                        }
+                        if (found_id.empty()) {
+                            bot.send_message(msg.channel_id, bronx::emj_no + " Could not find role `" + q + "`.");
+                            return;
+                        }
+                        cfg.captcha_role_id = found_id;
+                        g_db->save_welcome_leave_config(cfg);
+                        bot.send_message(msg.channel_id, "✅ Join CAPTCHA verified role set to **" + found_name + "** (`" + found_id + "`).");
+                    } else if (opt == "timeout" && args.size() >= 3) {
+                        int sec = 120;
+                        try { sec = std::stoi(args[2]); } catch (...) {}
+                        sec = std::max(30, std::min(600, sec));
+                        cfg.captcha_timeout_sec = sec;
+                        g_db->save_welcome_leave_config(cfg);
+                        bot.send_message(msg.channel_id, "✅ Join CAPTCHA timeout set to **" + std::to_string(sec) + "s**.");
+                    } else if (opt == "kick" && args.size() >= 3) {
+                        std::string v = args[2];
+                        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                        cfg.captcha_kick_on_fail = (v == "on" || v == "true" || v == "1" || v == "yes");
+                        g_db->save_welcome_leave_config(cfg);
+                        bot.send_message(msg.channel_id, std::string("✅ Kick on failed/expired CAPTCHA: **") +
+                            (cfg.captcha_kick_on_fail ? "on" : "off") + "**.");
+                    } else {
+                        bot.send_message(msg.channel_id, "Usage: `" + pfx + "welcome captcha <mode|channel|role|timeout|kick> <value>`");
+                    }
+                    return;
+                }
 
                 if (subcommand == "role") {
                     if (args.size() < 2) {
@@ -1598,15 +1727,80 @@ public:
             if (!config_opt) return;
 
             auto config = *config_opt;
+            const bool captcha_active = (config.captcha_mode == "dm") ||
+                                        (config.captcha_mode == "channel" && !config.captcha_channel_id.empty());
 
-            // 1. Assign custom Autorole if configured
-            if (!config.autorole_role_id.empty()) {
+            // 1. Assign custom Autorole if configured (deferred until CAPTCHA solve when CAPTCHA is active and no separate captcha_role_id is set)
+            if (!config.autorole_role_id.empty() && !(captcha_active && config.captcha_role_id.empty())) {
                 std::cout << "[bronx autorole] assigning role " << config.autorole_role_id << " to member " << e.user_id << " in " << e.server_id << "\n";
                 bot.add_role_to_member(e.server_id, e.user_id, config.autorole_role_id, [e, config](bool ok, std::string err) {
                     if (!ok) {
                         std::cerr << "[bronx autorole] failed to assign role " << config.autorole_role_id << " to member " << e.user_id << " in " << e.server_id << ": " << err << "\n";
                     }
                 });
+            }
+
+            // 1b. Dispatch Join CAPTCHA Challenge if configured
+            if (captcha_active) {
+                std::thread([&bot, e, config]() {
+                    std::string target_ch = (config.captcha_mode == "channel") ? config.captcha_channel_id : "";
+                    if (config.captcha_mode == "dm") {
+                        auto dm_res = bot.rest().open_dm(e.user_id);
+                        if (dm_res.success() && dm_res.body.is_object() && dm_res.body.contains("_id") && dm_res.body["_id"].is_string()) {
+                            target_ch = dm_res.body["_id"].get<std::string>();
+                        } else if (!config.captcha_channel_id.empty()) {
+                            target_ch = config.captcha_channel_id;
+                        }
+                    }
+                    if (target_ch.empty()) return;
+
+                    std::string code = generate_captcha_text(6);
+                    std::string png = render_captcha_image(code);
+                    std::string file_id = chart::upload_chart(bot, png, "captcha.png");
+                    if (file_id.empty()) return;
+
+                    auto srv_opt = bot.get_server(e.server_id);
+                    std::string srv_name = srv_opt ? srv_opt->name : "this server";
+                    std::string role_to_grant = !config.captcha_role_id.empty() ? config.captcha_role_id : config.autorole_role_id;
+
+                    stoatpp::models::MessagePayload cap_payload;
+                    cap_payload.content = (config.captcha_mode == "channel") ? ("<@" + e.user_id + ">") : " ";
+                    nlohmann::json cap_embed = nlohmann::json::object();
+                    cap_embed["title"] = "🛡️ Verification Required - " + srv_name;
+                    cap_embed["colour"] = "#5865F2";
+                    cap_embed["description"] = "Please reply in this channel with the **6 characters** shown in the image below within **" +
+                        std::to_string(config.captcha_timeout_sec) + "s** to verify.";
+                    cap_embed["media"] = file_id;
+                    cap_payload.embeds.push_back(cap_embed);
+
+                    bot.send_message(target_ch, cap_payload);
+
+                    std::string key = target_ch + ":" + e.user_id;
+                    auto exp = std::chrono::steady_clock::now() + std::chrono::seconds(config.captcha_timeout_sec);
+                    {
+                        std::lock_guard<std::mutex> lock(captcha_mutex_);
+                        pending_captchas_[key] = {e.server_id, e.user_id, target_ch, code, role_to_grant, config.captcha_kick_on_fail, 3, exp};
+                    }
+
+                    std::this_thread::sleep_for(std::chrono::seconds(config.captcha_timeout_sec));
+                    bool expired_here = false;
+                    PendingJoinCaptcha timed_out;
+                    {
+                        std::lock_guard<std::mutex> lock(captcha_mutex_);
+                        auto it = pending_captchas_.find(key);
+                        if (it != pending_captchas_.end() && it->second.code == code) {
+                            timed_out = it->second;
+                            pending_captchas_.erase(it);
+                            expired_here = true;
+                        }
+                    }
+                    if (expired_here) {
+                        bot.send_message(target_ch, "⏱️ <@" + e.user_id + "> Verification timed out.");
+                        if (timed_out.kick_on_fail) {
+                            bot.kick_member(timed_out.server_id, timed_out.user_id);
+                        }
+                    }
+                }).detach();
             }
 
             // 2. Dispatch Welcome Message if configured
@@ -1846,6 +2040,69 @@ public:
                     }
                 });
             });
+        });
+
+        // --- JOIN CAPTCHA REPLY HANDLER ---
+        bot.on_message([&bot](const stoatpp::events::Message& e) {
+            if (e.author.id.empty() || e.author.id == bot.current_user().id) return;
+            std::string key = e.channel_id + ":" + e.author.id;
+            PendingJoinCaptcha challenge;
+            bool has_challenge = false;
+            bool solved = false;
+            bool failed_out = false;
+            int attempts_left = 0;
+
+            std::string guess = e.content;
+            guess.erase(std::remove_if(guess.begin(), guess.end(), ::isspace), guess.end());
+            std::transform(guess.begin(), guess.end(), guess.begin(), ::toupper);
+            if (guess.empty()) return;
+
+            {
+                std::lock_guard<std::mutex> lock(captcha_mutex_);
+                auto it = pending_captchas_.find(key);
+                if (it == pending_captchas_.end()) return;
+                if (std::chrono::steady_clock::now() > it->second.expires_at) {
+                    pending_captchas_.erase(it);
+                    return;
+                }
+                has_challenge = true;
+                if (guess == it->second.code) {
+                    solved = true;
+                    challenge = it->second;
+                    pending_captchas_.erase(it);
+                } else {
+                    it->second.attempts_left--;
+                    attempts_left = it->second.attempts_left;
+                    if (attempts_left <= 0) {
+                        failed_out = true;
+                        challenge = it->second;
+                        pending_captchas_.erase(it);
+                    }
+                }
+            }
+
+            if (!has_challenge) return;
+
+            if (solved) {
+                if (!challenge.role_id.empty()) {
+                    bot.add_role_to_member(challenge.server_id, challenge.user_id, challenge.role_id,
+                        [&bot, challenge](bool ok, std::string err) {
+                            if (!ok) {
+                                std::cerr << "[bronx captcha] failed to grant verified role " << challenge.role_id
+                                          << " to " << challenge.user_id << ": " << err << "\n";
+                            }
+                        });
+                }
+                bot.send_message(e.channel_id, bronx::emj_yes + " <@" + e.author.id + "> **Verification complete!** You are now verified.");
+            } else if (failed_out) {
+                bot.send_message(e.channel_id, bronx::emj_no + " <@" + e.author.id + "> **Verification failed** (no attempts remaining).");
+                if (challenge.kick_on_fail) {
+                    bot.kick_member(challenge.server_id, challenge.user_id);
+                }
+            } else {
+                bot.send_message(e.channel_id, bronx::emj_no + " <@" + e.author.id + "> Incorrect CAPTCHA code. **" +
+                    std::to_string(attempts_left) + "** attempt(s) remaining.");
+            }
         });
     }
 };
