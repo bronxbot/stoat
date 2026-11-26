@@ -1841,4 +1841,78 @@ bool Database::reload_roles(const std::string &server_id) {
   return true;
 }
 
+Database::TtsUserSettings Database::get_tts_user_settings(const std::string &user_id) {
+  {
+    std::shared_lock<std::shared_mutex> rlock(tts_user_cache_mutex_);
+    auto it = tts_user_cache_.find(user_id);
+    if (it != tts_user_cache_.end())
+      return it->second;
+  }
+
+  TtsUserSettings settings;
+  std::lock_guard<std::mutex> db_lock(db_mutex_);
+  if (!mysql_)
+    return settings;
+
+  std::string q = "SELECT prefix_template, voice FROM tts_user_settings WHERE user_id = '" +
+                  escape_string(user_id) + "'";
+  if (mysql_query(mysql_, q.c_str()) == 0) {
+    MYSQL_RES *res = mysql_store_result(mysql_);
+    if (res) {
+      MYSQL_ROW row = mysql_fetch_row(res);
+      if (row) {
+        if (row[0])
+          settings.prefix_template = row[0];
+        if (row[1] && row[1][0] != '\0')
+          settings.voice = row[1];
+      }
+      mysql_free_result(res);
+    }
+  }
+
+  {
+    std::lock_guard<std::shared_mutex> wlock(tts_user_cache_mutex_);
+    tts_user_cache_[user_id] = settings;
+  }
+  return settings;
+}
+
+bool Database::set_tts_prefix(const std::string &user_id,
+                              const std::string &prefix_template) {
+  std::lock_guard<std::mutex> db_lock(db_mutex_);
+  if (!mysql_)
+    return false;
+  std::string esc_uid = escape_string(user_id);
+  std::string esc_pfx = escape_string(prefix_template);
+  std::string q =
+      "INSERT INTO tts_user_settings (user_id, prefix_template) VALUES ('" +
+      esc_uid + "', '" + esc_pfx +
+      "') ON DUPLICATE KEY UPDATE prefix_template = '" + esc_pfx + "'";
+  if (mysql_query(mysql_, q.c_str()))
+    return false;
+
+  std::lock_guard<std::shared_mutex> wlock(tts_user_cache_mutex_);
+  tts_user_cache_[user_id].prefix_template = prefix_template;
+  return true;
+}
+
+bool Database::set_tts_voice(const std::string &user_id,
+                             const std::string &voice) {
+  std::lock_guard<std::mutex> db_lock(db_mutex_);
+  if (!mysql_)
+    return false;
+  std::string esc_uid = escape_string(user_id);
+  std::string esc_voice = escape_string(voice);
+  std::string q =
+      "INSERT INTO tts_user_settings (user_id, voice) VALUES ('" + esc_uid +
+      "', '" + esc_voice + "') ON DUPLICATE KEY UPDATE voice = '" + esc_voice +
+      "'";
+  if (mysql_query(mysql_, q.c_str()))
+    return false;
+
+  std::lock_guard<std::shared_mutex> wlock(tts_user_cache_mutex_);
+  tts_user_cache_[user_id].voice = voice;
+  return true;
+}
+
 } // namespace bronx

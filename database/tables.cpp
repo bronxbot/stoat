@@ -1704,6 +1704,13 @@ bool Database::init_tables() {
                         "  PRIMARY KEY (channel_id, bin_idx)"
                         ")");
 
+    mysql_query(mysql_, "CREATE TABLE IF NOT EXISTS tts_user_settings ("
+                        "  user_id VARCHAR(64) NOT NULL PRIMARY KEY,"
+                        "  prefix_template VARCHAR(100) NOT NULL DEFAULT '{user} says',"
+                        "  voice VARCHAR(64) NOT NULL DEFAULT 'en-US-AndrewMultilingualNeural',"
+                        "  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+                        ")");
+
     return true;
 }
 

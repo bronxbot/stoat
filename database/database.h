@@ -1271,6 +1271,16 @@ public:
   void save_channel_hourly_baselines(const std::string &channel_id,
                                      const std::array<double, 168> &bins);
 
+  // Per-user TTS settings (prefix template and voice)
+  struct TtsUserSettings {
+    std::string prefix_template = "{user} says";
+    std::string voice = "en-US-AndrewMultilingualNeural";
+  };
+  TtsUserSettings get_tts_user_settings(const std::string &user_id);
+  bool set_tts_prefix(const std::string &user_id,
+                      const std::string &prefix_template);
+  bool set_tts_voice(const std::string &user_id, const std::string &voice);
+
 private:
   MYSQL *mysql_ = nullptr;
   std::unordered_map<std::string, UserAFK> user_afk_cache_;
@@ -1285,6 +1295,8 @@ private:
 
   std::unordered_map<std::string, std::vector<std::string>> cache_;
   std::shared_mutex cache_mutex_;
+  std::unordered_map<std::string, TtsUserSettings> tts_user_cache_;
+  std::shared_mutex tts_user_cache_mutex_;
   std::mutex db_mutex_;
 
   // Message ID -> RRMessage

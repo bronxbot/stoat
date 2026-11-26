@@ -40,10 +40,13 @@ public:
   using WriteAudio = std::function<bool(const int16_t *, size_t)>;
   using SendMessage =
       std::function<void(const std::string &, const std::string &)>;
+  using IsTtsSpeaking = std::function<bool()>;
 
-  VoiceMusicPlayer(WriteAudio write_audio, SendMessage send_message)
+  VoiceMusicPlayer(WriteAudio write_audio, SendMessage send_message,
+                   IsTtsSpeaking is_tts_speaking = nullptr)
       : write_audio_(std::move(write_audio)),
-        send_message_(std::move(send_message)) {
+        send_message_(std::move(send_message)),
+        is_tts_speaking_(std::move(is_tts_speaking)) {
     worker_ = std::thread([this] { run(); });
   }
 
@@ -130,6 +133,11 @@ public:
     volume_ = volume;
     return "Volume set to " + std::to_string(static_cast<int>(volume * 100)) +
            "%.";
+  }
+
+  bool is_playing() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return current_.has_value();
   }
 
   std::string queue_text() const {
@@ -223,9 +231,6 @@ private:
       spawn_error =
           posix_spawn_file_actions_adddup2(&decoder_actions, audio_pipe[1],
                                            STDOUT_FILENO);
-    if (spawn_error == 0)
-      spawn_error = posix_spawn_file_actions_addopen(
-          &decoder_actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
     for (int fd : {source_pipe[0], source_pipe[1], audio_pipe[0],
                    audio_pipe[1]}) {
       if (spawn_error == 0)
@@ -266,9 +271,6 @@ private:
     if (spawn_error == 0)
       spawn_error = posix_spawn_file_actions_addopen(
           &extractor_actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
-    if (spawn_error == 0)
-      spawn_error = posix_spawn_file_actions_addopen(
-          &extractor_actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
     for (int fd : {source_pipe[0], source_pipe[1], audio_pipe[0],
                    audio_pipe[1]}) {
       if (spawn_error == 0)
@@ -277,6 +279,14 @@ private:
     }
     pid_t extractor = -1;
     if (spawn_error == 0) {
+      std::string cookies_path;
+      if (const char *env_cookies = std::getenv("YTDLP_COOKIES_FILE")) {
+        if (*env_cookies && access(env_cookies, R_OK) == 0)
+          cookies_path = env_cookies;
+      } else if (access("/app/cookies.txt", R_OK) == 0) {
+        cookies_path = "/app/cookies.txt";
+      }
+
       std::vector<char *> argv = {
           const_cast<char *>("yt-dlp"),
           const_cast<char *>("--ignore-config"),
@@ -285,10 +295,18 @@ private:
           const_cast<char *>("--fragment-retries"), const_cast<char *>("1"),
           const_cast<char *>("--quiet"),
           const_cast<char *>("--no-warnings"),
-          const_cast<char *>("--no-playlist"), const_cast<char *>("-f"),
-          const_cast<char *>("bestaudio/best"), const_cast<char *>("-o"),
-          const_cast<char *>("-"), const_cast<char *>("--"),
-          const_cast<char *>(url.c_str()), nullptr};
+          const_cast<char *>("--no-playlist")};
+      if (!cookies_path.empty()) {
+        argv.push_back(const_cast<char *>("--cookies"));
+        argv.push_back(const_cast<char *>(cookies_path.c_str()));
+      }
+      argv.push_back(const_cast<char *>("-f"));
+      argv.push_back(const_cast<char *>("bestaudio/best"));
+      argv.push_back(const_cast<char *>("-o"));
+      argv.push_back(const_cast<char *>("-"));
+      argv.push_back(const_cast<char *>("--"));
+      argv.push_back(const_cast<char *>(url.c_str()));
+      argv.push_back(nullptr);
       spawn_error =
           posix_spawnp(&extractor, "yt-dlp", &extractor_actions, nullptr,
                        argv.data(), environ);
@@ -382,9 +400,15 @@ private:
   }
 
   TrackResult play_track(const QueuedTrack &queued, std::string &error) {
+    const auto started = std::chrono::steady_clock::now();
+    std::cout << "[bronx music] starting stream: \"" << queued.track.title
+              << "\" (" << queued.track.url << ")" << std::endl;
     MediaProcess media;
-    if (!start_media_process(queued.track.url, media, error))
+    if (!start_media_process(queued.track.url, media, error)) {
+      std::cerr << "[bronx music] start_media_process failed: " << error
+                << std::endl;
       return TrackResult::Failed;
+    }
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -462,6 +486,14 @@ private:
         error = "The voice connection is no longer available.";
         break;
       }
+      if (!received_audio) {
+        const auto first_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started)
+                .count();
+        std::cout << "[bronx music] first PCM audio chunk after " << first_ms
+                  << "ms" << std::endl;
+      }
       received_audio = true;
 
       const auto frame_duration = std::chrono::duration_cast<
@@ -487,15 +519,25 @@ private:
                            cancel_current_;
     }
 
-    if (cancelled_playback)
+    if (cancelled_playback) {
+      std::cout << "[bronx music] track cancelled: \"" << queued.track.title
+                << "\"" << std::endl;
       return TrackResult::Cancelled;
+    }
     if (!received_audio || !decoder_ok || !extractor_ok) {
+      std::cerr << "[bronx music] track failed: \"" << queued.track.title
+                << "\" (received_audio=" << received_audio
+                << " decoder_ok=" << decoder_ok
+                << " extractor_ok=" << extractor_ok
+                << " error=\"" << error << "\")" << std::endl;
       if (error.empty())
         error =
             "Could not play this track. Check that yt-dlp and ffmpeg are installed "
             "and the video is available.";
       return TrackResult::Failed;
     }
+    std::cout << "[bronx music] track finished: \"" << queued.track.title
+              << "\"" << std::endl;
     return TrackResult::Finished;
   }
 
@@ -519,6 +561,15 @@ private:
              "🎵 Now playing **" + queued.track.title + "** (" +
                  format_duration(queued.track.duration_seconds) + ").");
 
+      while (is_tts_speaking_ && is_tts_speaking_()) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (shutting_down_ || cancel_current_)
+          break;
+        condition_.wait_for(lock, std::chrono::milliseconds(50), [this] {
+          return shutting_down_ || cancel_current_;
+        });
+      }
+
       std::string error;
       const TrackResult result = play_track(queued, error);
       {
@@ -536,6 +587,7 @@ private:
 
   WriteAudio write_audio_;
   SendMessage send_message_;
+  IsTtsSpeaking is_tts_speaking_;
   mutable std::mutex mutex_;
   std::condition_variable condition_;
   std::deque<QueuedTrack> queue_;

@@ -4,6 +4,8 @@
 #include "stoatpp/pulse_voice.h"
 #include "stoatpp/voice_connection.h"
 #include "voice_music.h"
+#include "voice_tts.h"
+#include <httplib.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <atomic>
@@ -41,11 +43,9 @@ public:
           task.thread.join();
       }
     }
-    if (music_)
-      music_->shutdown();
     {
-      std::lock_guard<std::mutex> lock(voice_mutex_);
-      voice_.disconnect();
+      std::lock_guard<std::mutex> lock(sessions_mutex_);
+      sessions_.clear();
     }
     {
       std::lock_guard<std::mutex> lock(pulse_mutex_);
@@ -54,24 +54,7 @@ public:
   }
 
   void register_handlers(stoatpp::cluster &bot) override {
-    music_ = std::make_unique<VoiceMusicPlayer>(
-        [this](const int16_t *samples, size_t count) {
-          std::lock_guard<std::mutex> lock(voice_mutex_);
-          return voice_.is_connected() && voice_.write_pcm(samples, count);
-        },
-        [&bot](const std::string &channel_id, const std::string &message) {
-          bot.send_message(channel_id, message);
-        });
-
-    // Hook PulseAudio to WebRTC voice stream
-    pulse_.set_audio_monitor([this](const int16_t* samples, size_t count) {
-      std::lock_guard<std::mutex> lock(voice_mutex_);
-      if (voice_.is_connected()) {
-        voice_.write_pcm(samples, count);
-      }
-    });
-
-    // 0. Listen to voice state updates to play join/leave chimes and log active status
+    // 0. Listen to voice state updates to track user channels and handle bot disconnect
     bot.on_voice_state_update([this, &bot](const stoatpp::events::VoiceStateUpdate &ev) {
       {
         std::lock_guard<std::mutex> lock(voice_state_mutex_);
@@ -87,35 +70,25 @@ public:
       }
 
       if (!ev.joined && ev.user_id == bot.current_user().id) {
-        std::lock_guard<std::mutex> operation_lock(voice_operation_mutex_);
-        bool left_current_channel = false;
-        {
-          std::lock_guard<std::mutex> lock(voice_mutex_);
-          left_current_channel =
-              !current_channel_id_.empty() &&
-              (ev.channel_id.empty() || current_channel_id_ == ev.channel_id);
-        }
-        if (left_current_channel) {
-          music_->stop();
+        auto session = find_session_by_channel(ev.channel_id);
+        if (session) {
+          std::lock_guard<std::mutex> operation_lock(session->operation_mutex);
+          bool left_current_channel = false;
           {
-            std::lock_guard<std::mutex> lock(voice_mutex_);
-            voice_.disconnect();
-            current_channel_id_.clear();
+            std::lock_guard<std::mutex> lock(session->voice_mutex);
+            left_current_channel =
+                !session->channel_id.empty() &&
+                (ev.channel_id.empty() || session->channel_id == ev.channel_id);
           }
-          std::lock_guard<std::mutex> lock(pulse_mutex_);
-          pulse_.shutdown();
+          if (left_current_channel) {
+            session->music->stop();
+            session->tts->stop();
+            std::lock_guard<std::mutex> lock(session->voice_mutex);
+            session->voice.disconnect();
+            session->channel_id.clear();
+            session->tts_channel_id.clear();
+          }
         }
-      }
-
-      bool should_play_chime = false;
-      {
-        std::lock_guard<std::mutex> lock(voice_mutex_);
-        should_play_chime = !current_channel_id_.empty() &&
-                            ev.channel_id == current_channel_id_;
-      }
-      if (should_play_chime) {
-        std::lock_guard<std::mutex> lock(pulse_mutex_);
-        pulse_.play_chime(ev.joined);
       }
     });
 
@@ -146,7 +119,7 @@ public:
 
              bot.send_message(msg.channel_id,
                               "[Voice] Joining " + channel_name + "...");
-             if (!connect_to_voice(bot, channel_id, error)) {
+             if (!connect_to_voice(bot, msg.server_id, channel_id, error)) {
                bot.send_message(msg.channel_id, "[Voice] " + error);
                return;
              }
@@ -156,42 +129,46 @@ public:
          },
          "Voice"});
 
-    // 2. Leave voice channel command
+    // 2. Disconnect from voice channel command
     bot.register_command(
-        {"leave",
-         {"part", "disconnect", "stop"},
-         "leave the current voice channel.",
-         "leave",
+        {"dc",
+         {"disconnect", "part", "stop"},
+         "disconnect from the current voice channel.",
+         "dc",
          {},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
             const std::vector<std::string> &args) {
-           if (active_channel_id().empty()) {
-             bot.send_message(msg.channel_id, "" + bronx::emj_warning + " I am not currently connected to any voice channel.");
+           if (msg.server_id.empty() || active_channel_id(msg.server_id).empty()) {
+             bot.send_message(msg.channel_id, "" + bronx::emj_warning + " I am not currently connected to any voice channel in this server.");
              return;
            }
 
            launch_task(bot, msg.channel_id, [this, &bot, msg] {
-             std::lock_guard<std::mutex> operation_lock(voice_operation_mutex_);
-             music_->stop();
+             auto session = find_session(msg.server_id);
+             if (!session) {
+               bot.send_message(msg.channel_id,
+                                "I am not currently connected to a voice channel in this server.");
+               return;
+             }
+             std::lock_guard<std::mutex> operation_lock(session->operation_mutex);
+             session->music->stop();
+             session->tts->stop();
              std::string channel_id;
              {
-               std::lock_guard<std::mutex> lock(voice_mutex_);
-               channel_id = current_channel_id_;
+               std::lock_guard<std::mutex> lock(session->voice_mutex);
+               channel_id = session->channel_id;
              }
              if (channel_id.empty()) {
                bot.send_message(msg.channel_id,
-                                "I am not currently connected to a voice channel.");
+                                "I am not currently connected to a voice channel in this server.");
                return;
              }
              bot.ws().leave_voice_channel(channel_id);
              {
-               std::lock_guard<std::mutex> lock(voice_mutex_);
-               voice_.disconnect();
-               current_channel_id_.clear();
-             }
-             {
-               std::lock_guard<std::mutex> lock(pulse_mutex_);
-               pulse_.shutdown();
+               std::lock_guard<std::mutex> lock(session->voice_mutex);
+               session->voice.disconnect();
+               session->channel_id.clear();
+               session->tts_channel_id.clear();
              }
              bot.send_message(msg.channel_id,
                               "👋 Disconnected from the voice channel.");
@@ -324,79 +301,39 @@ public:
          },
          "Voice"});
 
-    // 5. Resolve a YouTube URL or search and enqueue it for playback.
+    // 5. Resolve a YouTube/SoundCloud URL or search and enqueue it for playback.
     bot.register_command(
         {"play",
          {"p", "playyt", "yt", "youtube"},
-         "play or queue a YouTube video by URL or search query.",
-         "play <youtube_url_or_search>",
-         {"<youtube_url_or_search>"},
+         "play or queue a YouTube or SoundCloud track by URL or search query.",
+         "play <url_or_search>",
+         {"<url_or_search>"},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
                 const std::vector<std::string> &args) {
            if (args.empty()) {
              bot.send_message(msg.channel_id,
-                              "Usage: `.play <YouTube URL or search query>`");
+                              "Usage: `.play <YouTube/SoundCloud URL or search query>`");
              return;
            }
-           if (msg.server_id.empty()) {
+           play_query(bot, msg, join_args(args), false);
+         },
+         "Voice"});
+
+    // 5b. Search and play from SoundCloud directly.
+    bot.register_command(
+        {"soundcloud",
+         {"sc", "playsc"},
+         "search SoundCloud and play or queue the top result.",
+         "soundcloud <search_or_url>",
+         {"<search_or_url>"},
+         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                const std::vector<std::string> &args) {
+           if (args.empty()) {
              bot.send_message(msg.channel_id,
-                              "[Music] This command can only be used in a server.");
+                              "Usage: `.sc <SoundCloud URL or search query>`");
              return;
            }
-           const std::string query = join_args(args);
-           launch_task(bot, msg.channel_id, [this, &bot, msg, query] {
-             const std::string caller_channel =
-                 user_voice_channel(msg.author.id);
-             std::string current_channel = active_channel_id();
-             std::string error;
-             if (current_channel.empty()) {
-               if (caller_channel.empty()) {
-                 bot.send_message(
-                     msg.channel_id,
-                     "[Music] Join a voice channel first, or use `.join <channel>`.");
-                 return;
-               }
-               if (!connect_to_voice(bot, caller_channel, error)) {
-                 bot.send_message(msg.channel_id, "[Voice] " + error);
-                 return;
-               }
-               current_channel = caller_channel;
-             } else if (caller_channel.empty() ||
-                        caller_channel != current_channel) {
-               bot.send_message(
-                   msg.channel_id,
-                   "[Music] Join my current voice channel to control playback.");
-               return;
-             }
-             if (!voice_is_connected() &&
-                 !connect_to_voice(bot, current_channel, error)) {
-               bot.send_message(msg.channel_id, "[Voice] " + error);
-               return;
-             }
-
-             bot.send_message(msg.channel_id, "[Music] Searching YouTube...");
-             auto track = resolve_youtube(query, error);
-             if (!track) {
-               bot.send_message(msg.channel_id, "[Music] " + error);
-               return;
-             }
-             if (active_channel_id() != current_channel) {
-               bot.send_message(
-                   msg.channel_id,
-                   "[Music] The voice connection changed before the track was queued.");
-               return;
-             }
-
-             size_t position = 0;
-             if (!music_->enqueue(std::move(*track), msg.channel_id, position)) {
-               bot.send_message(msg.channel_id,
-                                "[Music] The queue is full or shutting down.");
-               return;
-             }
-             bot.send_message(msg.channel_id,
-                              "[Music] Added to the queue at position " +
-                                  std::to_string(position) + ".");
-           });
+           play_query(bot, msg, join_args(args), true);
          },
          "Voice"});
 
@@ -408,12 +345,13 @@ public:
          {},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
                 const std::vector<std::string> &) {
+           std::shared_ptr<ServerVoiceSession> session;
            std::string error;
-           if (!can_control_player(msg, error)) {
+           if (!can_control_player(msg, session, error)) {
              bot.send_message(msg.channel_id, "[Music] " + error);
              return;
            }
-           bot.send_message(msg.channel_id, music_->queue_text());
+           bot.send_message(msg.channel_id, session->music->queue_text());
          },
          "Voice"});
 
@@ -425,12 +363,13 @@ public:
          {},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
                 const std::vector<std::string> &) {
+           std::shared_ptr<ServerVoiceSession> session;
            std::string error;
-           if (!can_control_player(msg, error)) {
+           if (!can_control_player(msg, session, error)) {
              bot.send_message(msg.channel_id, "[Music] " + error);
              return;
            }
-           bot.send_message(msg.channel_id, music_->skip());
+           bot.send_message(msg.channel_id, session->music->skip());
          },
          "Voice"});
 
@@ -442,12 +381,13 @@ public:
          {},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
                 const std::vector<std::string> &) {
+           std::shared_ptr<ServerVoiceSession> session;
            std::string error;
-           if (!can_control_player(msg, error)) {
+           if (!can_control_player(msg, session, error)) {
              bot.send_message(msg.channel_id, "[Music] " + error);
              return;
            }
-           bot.send_message(msg.channel_id, music_->pause());
+           bot.send_message(msg.channel_id, session->music->pause());
          },
          "Voice"});
 
@@ -459,12 +399,13 @@ public:
          {},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
                 const std::vector<std::string> &) {
+           std::shared_ptr<ServerVoiceSession> session;
            std::string error;
-           if (!can_control_player(msg, error)) {
+           if (!can_control_player(msg, session, error)) {
              bot.send_message(msg.channel_id, "[Music] " + error);
              return;
            }
-           bot.send_message(msg.channel_id, music_->resume());
+           bot.send_message(msg.channel_id, session->music->resume());
          },
          "Voice"});
 
@@ -476,12 +417,13 @@ public:
          {},
          [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
                 const std::vector<std::string> &) {
+           std::shared_ptr<ServerVoiceSession> session;
            std::string error;
-           if (!can_control_player(msg, error)) {
+           if (!can_control_player(msg, session, error)) {
              bot.send_message(msg.channel_id, "[Music] " + error);
              return;
            }
-           bot.send_message(msg.channel_id, music_->clear_queue());
+           bot.send_message(msg.channel_id, session->music->clear_queue());
          },
          "Voice"});
 
@@ -497,8 +439,9 @@ public:
              bot.send_message(msg.channel_id, "Usage: `.volume <0-200>`");
              return;
            }
+           std::shared_ptr<ServerVoiceSession> session;
            std::string error;
-           if (!can_control_player(msg, error)) {
+           if (!can_control_player(msg, session, error)) {
              bot.send_message(msg.channel_id, "[Music] " + error);
              return;
            }
@@ -512,7 +455,7 @@ public:
              }
              bot.send_message(
                  msg.channel_id,
-                 music_->set_volume(static_cast<double>(volume) / 100.0));
+                 session->music->set_volume(static_cast<double>(volume) / 100.0));
            } catch (const std::invalid_argument &) {
              bot.send_message(msg.channel_id,
                               "Volume must be a whole number from 0 to 200.");
@@ -522,9 +465,346 @@ public:
            }
          },
          "Voice"});
+
+    // 5. TTS chat monitor & per-user prefix/voice configuration
+    bot.register_command(
+        {"tts",
+         {},
+         "join your voice channel and read messages from this channel, or configure your TTS prefix/voice.",
+         "tts [stop|skip|prefix <template|none|reset>|voice <name|list|reset>]",
+         {"[subcommand]"},
+         [this](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                const std::vector<std::string> &args) {
+           if (!args.empty()) {
+             const std::string sub = lowercase(args[0]);
+             if (sub == "prefix") {
+               if (!bronx::g_db) {
+                 bot.send_message(msg.channel_id,
+                                  "[TTS] Database is not available.");
+                 return;
+               }
+               if (args.size() == 1) {
+                 auto settings = bronx::g_db->get_tts_user_settings(msg.author.id);
+                 std::string display_pfx = settings.prefix_template.empty()
+                                               ? "(none)"
+                                               : "`" + settings.prefix_template + "`";
+                 bot.send_message(
+                     msg.channel_id,
+                     "[TTS] Your current prefix is " + display_pfx +
+                         ".\nUsage: `.tts prefix <template>` (use `{user}` for your name, e.g. `.tts prefix {user} says`), `.tts prefix none`, or `.tts prefix reset`.");
+                 return;
+               }
+               std::vector<std::string> rest(args.begin() + 1, args.end());
+               std::string new_prefix = join_args(rest);
+               std::string lower_pfx = lowercase(new_prefix);
+               if (lower_pfx == "none" || lower_pfx == "off") {
+                 new_prefix.clear();
+               } else if (lower_pfx == "reset" || lower_pfx == "default") {
+                 new_prefix = "{user} says";
+               } else if (new_prefix.size() > 60) {
+                 bot.send_message(
+                     msg.channel_id,
+                     "[TTS] Prefix template must be 60 characters or fewer.");
+                 return;
+               }
+               if (bronx::g_db->set_tts_prefix(msg.author.id, new_prefix)) {
+                 std::string msg_out =
+                     new_prefix.empty()
+                         ? "[TTS] Disabled spoken prefix for your messages."
+                         : "[TTS] Updated your spoken prefix to `" +
+                               new_prefix + "`.";
+                 bot.send_message(msg.channel_id, msg_out);
+               } else {
+                 bot.send_message(msg.channel_id,
+                                  "[TTS] Failed to save your prefix.");
+               }
+               return;
+             }
+
+             if (sub == "voice") {
+               if (!bronx::g_db) {
+                 bot.send_message(msg.channel_id,
+                                  "[TTS] Database is not available.");
+                 return;
+               }
+               if (args.size() == 1) {
+                 auto settings = bronx::g_db->get_tts_user_settings(msg.author.id);
+                 bot.send_message(
+                     msg.channel_id,
+                     "[TTS] Your current voice is `" + settings.voice +
+                         "`. Use `.tts voice list` to see popular options or `.tts voice <name>` to change it.");
+                 return;
+               }
+               const std::string arg = args[1];
+               const std::string lower_arg = lowercase(arg);
+               if (lower_arg == "list") {
+                 bot.send_message(
+                     msg.channel_id,
+                     "[TTS] Popular free voices:\n"
+                     "- `en-US-AndrewMultilingualNeural` (default)\n"
+                     "- `en-US-AriaNeural`\n"
+                     "- `en-US-GuyNeural`\n"
+                     "- `en-US-JennyNeural`\n"
+                     "- `en-GB-SoniaNeural`\n"
+                     "- `en-GB-RyanNeural`\n"
+                     "- `en-AU-NatashaNeural`");
+                 return;
+               }
+               std::string new_voice =
+                   (lower_arg == "reset" || lower_arg == "default")
+                       ? "en-US-AndrewMultilingualNeural"
+                       : arg;
+               if (new_voice.size() > 64 ||
+                   new_voice.find_first_of(" \t\r\n") != std::string::npos) {
+                 bot.send_message(msg.channel_id,
+                                  "[TTS] Invalid voice name.");
+                 return;
+               }
+               if (bronx::g_db->set_tts_voice(msg.author.id, new_voice)) {
+                 bot.send_message(msg.channel_id,
+                                  "[TTS] Updated your voice to `" + new_voice +
+                                      "`.");
+               } else {
+                 bot.send_message(msg.channel_id,
+                                  "[TTS] Failed to save your voice.");
+               }
+               return;
+             }
+
+             if (sub == "stop" || sub == "off") {
+               std::shared_ptr<ServerVoiceSession> session;
+               std::string error;
+               if (!can_control_player(msg, session, error)) {
+                 bot.send_message(msg.channel_id, "[TTS] " + error);
+                 return;
+               }
+               session->tts->stop();
+               {
+                 std::lock_guard<std::mutex> lock(session->voice_mutex);
+                 session->tts_channel_id.clear();
+               }
+               bot.send_message(msg.channel_id,
+                                "🔇 Stopped TTS monitoring.");
+               return;
+             }
+
+             if (sub == "skip") {
+               std::shared_ptr<ServerVoiceSession> session;
+               std::string error;
+               if (!can_control_player(msg, session, error)) {
+                 bot.send_message(msg.channel_id, "[TTS] " + error);
+                 return;
+               }
+               session->tts->skip();
+               bot.send_message(msg.channel_id,
+                                "⏭️ Skipped the current TTS message.");
+               return;
+             }
+           }
+
+           if (msg.server_id.empty()) {
+             bot.send_message(msg.channel_id,
+                              "[TTS] This command can only be used in a server.");
+             return;
+           }
+
+           launch_task(bot, msg.channel_id, [this, &bot, msg] {
+             auto session = find_session(msg.server_id);
+             std::string current_vc;
+             if (session) {
+               std::lock_guard<std::mutex> lock(session->voice_mutex);
+               if (session->voice.is_connected())
+                 current_vc = session->channel_id;
+             }
+
+             if (current_vc.empty()) {
+               std::string channel_id;
+               std::string channel_name;
+               std::string error;
+               if (!resolve_voice_channel(bot, msg, {}, channel_id,
+                                          channel_name, error)) {
+                 bot.send_message(msg.channel_id, "[TTS] " + error);
+                 return;
+               }
+               if (!connect_to_voice(bot, msg.server_id, channel_id, error)) {
+                 bot.send_message(msg.channel_id, "[TTS] " + error);
+                 return;
+               }
+               session = find_session(msg.server_id);
+             } else if (user_voice_channel(msg.author.id) != current_vc) {
+               bot.send_message(
+                   msg.channel_id,
+                   "[TTS] Join my voice channel to toggle TTS.");
+               return;
+             }
+
+             if (!session) {
+               bot.send_message(msg.channel_id,
+                                "[TTS] Could not initialize voice session.");
+               return;
+             }
+
+             bool enabled = false;
+             {
+               std::lock_guard<std::mutex> lock(session->voice_mutex);
+               if (session->tts_channel_id == msg.channel_id) {
+                 session->tts_channel_id.clear();
+                 enabled = false;
+               } else {
+                 session->tts_channel_id = msg.channel_id;
+                 enabled = true;
+               }
+             }
+
+             if (!enabled) {
+               session->tts->stop();
+               bot.send_message(msg.channel_id,
+                                "🔇 Stopped TTS monitoring for this channel.");
+             } else {
+               bot.send_message(
+                   msg.channel_id,
+                   "🗣️ Now reading messages from this channel in voice. Use `.tts stop` to stop, or `.tts prefix <template>` to customize your spoken prefix.");
+             }
+           });
+         },
+         "Voice"});
+
+    // 6. Listen to messages in TTS-monitored channels
+    bot.on_message([this, &bot](const stoatpp::events::Message &msg) {
+      if (msg.server_id.empty() || msg.author.bot ||
+          msg.author.id == bot.current_user().id || msg.content.empty()) {
+        return;
+      }
+      if (!msg.prefix.empty() || msg.content[0] == '.') {
+        return;
+      }
+
+      auto session = find_session(msg.server_id);
+      if (!session)
+        return;
+
+      {
+        std::lock_guard<std::mutex> lock(session->voice_mutex);
+        if (!session->voice.is_connected() ||
+            session->tts_channel_id != msg.channel_id) {
+          return;
+        }
+      }
+
+      std::string cleaned = sanitize_tts_text(msg.content);
+      if (cleaned.empty())
+        return;
+
+      std::string speaker =
+          (msg.author.display_name && !msg.author.display_name->empty())
+              ? *msg.author.display_name
+              : msg.author.username;
+
+      bronx::Database::TtsUserSettings settings;
+      if (bronx::g_db)
+        settings = bronx::g_db->get_tts_user_settings(msg.author.id);
+
+      std::string spoken;
+      if (!settings.prefix_template.empty()) {
+        std::string pfx = settings.prefix_template;
+        const std::string token = "{user}";
+        size_t pos = 0;
+        while ((pos = pfx.find(token, pos)) != std::string::npos) {
+          pfx.replace(pos, token.size(), speaker);
+          pos += speaker.size();
+        }
+        spoken = pfx + " " + cleaned;
+      } else {
+        spoken = cleaned;
+      }
+
+      session->tts->enqueue(std::move(spoken), settings.voice);
+    });
   }
 
 private:
+  static std::string sanitize_tts_text(const std::string &raw) {
+    std::string out;
+    out.reserve(std::min<size_t>(raw.size(), 300));
+    for (size_t i = 0; i < raw.size() && out.size() < 300; ++i) {
+      if (raw.compare(i, 8, "https://") == 0 ||
+          raw.compare(i, 7, "http://") == 0) {
+        out += "a link";
+        while (i < raw.size() && !std::isspace(static_cast<unsigned char>(raw[i])))
+          ++i;
+        if (i < raw.size())
+          out += ' ';
+        continue;
+      }
+      if (raw[i] == '<' && i + 2 < raw.size()) {
+        size_t close = raw.find('>', i + 1);
+        if (close != std::string::npos && close - i < 64) {
+          if (raw[i + 1] == '@') {
+            out += "someone";
+            i = close;
+            continue;
+          }
+          if (raw[i + 1] == '#') {
+            out += "a channel";
+            i = close;
+            continue;
+          }
+          if (raw[i + 1] == ':') {
+            size_t second_colon = raw.find(':', i + 2);
+            if (second_colon != std::string::npos && second_colon < close) {
+              out += raw.substr(i + 2, second_colon - (i + 2));
+              i = close;
+              continue;
+            }
+          }
+        }
+      }
+      char c = raw[i];
+      if (c == '*' || c == '_' || c == '`' || c == '~' || c == '>')
+        continue;
+      if (c == '\n' || c == '\r' || c == '\t')
+        c = ' ';
+      if (c == ' ' && (out.empty() || out.back() == ' '))
+        continue;
+      out += c;
+    }
+    while (!out.empty() && out.back() == ' ')
+      out.pop_back();
+    return out;
+  }
+  struct ServerVoiceSession {
+    explicit ServerVoiceSession(stoatpp::cluster &bot) {
+      auto write_pcm = [this](const int16_t *samples, size_t count) {
+        std::lock_guard<std::mutex> lock(voice_mutex);
+        return voice.is_connected() && voice.write_pcm(samples, count);
+      };
+      music = std::make_unique<VoiceMusicPlayer>(
+          write_pcm,
+          [&bot](const std::string &channel_id, const std::string &message) {
+            bot.send_message(channel_id, message);
+          },
+          [this]() { return tts && tts->is_speaking(); });
+      tts = std::make_unique<VoiceTtsPlayer>(
+          write_pcm, [this]() { return music && music->is_playing(); });
+    }
+    ~ServerVoiceSession() {
+      if (tts)
+        tts->shutdown();
+      if (music)
+        music->shutdown();
+      std::lock_guard<std::mutex> lock(voice_mutex);
+      voice.disconnect();
+    }
+
+    stoatpp::voice_connection voice;
+    std::unique_ptr<VoiceMusicPlayer> music;
+    std::unique_ptr<VoiceTtsPlayer> tts;
+    std::string channel_id;
+    std::string tts_channel_id;
+    mutable std::mutex voice_mutex;
+    std::mutex operation_mutex;
+  };
+
   struct AsyncTask {
     std::thread thread;
     std::shared_ptr<std::atomic<bool>> finished;
@@ -543,7 +823,7 @@ private:
         ++it;
       }
     }
-    if (async_tasks_.size() >= 4) {
+    if (async_tasks_.size() >= 16) {
       bot.send_message(message_channel,
                        "[Voice] Too many requests are already in progress.");
       return;
@@ -583,25 +863,71 @@ private:
     return it == user_voice_channels_.end() ? "" : it->second;
   }
 
-  std::string active_channel_id() const {
-    std::lock_guard<std::mutex> lock(voice_mutex_);
-    return current_channel_id_;
+  std::shared_ptr<ServerVoiceSession>
+  get_or_create_session(stoatpp::cluster &bot, const std::string &server_id) {
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    auto &session = sessions_[server_id];
+    if (!session)
+      session = std::make_shared<ServerVoiceSession>(bot);
+    return session;
   }
 
-  bool voice_is_connected() const {
-    std::lock_guard<std::mutex> lock(voice_mutex_);
-    return voice_.is_connected();
+  std::shared_ptr<ServerVoiceSession>
+  find_session(const std::string &server_id) const {
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    auto it = sessions_.find(server_id);
+    return it == sessions_.end() ? nullptr : it->second;
+  }
+
+  std::shared_ptr<ServerVoiceSession>
+  find_session_by_channel(const std::string &channel_id) const {
+    if (channel_id.empty())
+      return nullptr;
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    for (const auto &[srv_id, session] : sessions_) {
+      if (!session)
+        continue;
+      std::lock_guard<std::mutex> vlock(session->voice_mutex);
+      if (session->channel_id == channel_id)
+        return session;
+    }
+    return nullptr;
+  }
+
+  std::string active_channel_id(const std::string &server_id) const {
+    auto session = find_session(server_id);
+    if (!session)
+      return "";
+    std::lock_guard<std::mutex> lock(session->voice_mutex);
+    return session->channel_id;
+  }
+
+  bool voice_is_connected(const std::string &server_id) const {
+    auto session = find_session(server_id);
+    if (!session)
+      return false;
+    std::lock_guard<std::mutex> lock(session->voice_mutex);
+    return session->voice.is_connected();
   }
 
   bool can_control_player(const stoatpp::events::Message &msg,
+                          std::shared_ptr<ServerVoiceSession> &session,
                           std::string &error) const {
-    const std::string channel_id = active_channel_id();
-    if (channel_id.empty()) {
-      error = "I am not connected to a voice channel.";
+    if (msg.server_id.empty()) {
+      error = "This command can only be used in a server.";
       return false;
     }
-    if (msg.server_id.empty() ||
-        user_voice_channel(msg.author.id) != channel_id) {
+    session = find_session(msg.server_id);
+    std::string channel_id;
+    if (session) {
+      std::lock_guard<std::mutex> lock(session->voice_mutex);
+      channel_id = session->channel_id;
+    }
+    if (channel_id.empty()) {
+      error = "I am not connected to a voice channel in this server.";
+      return false;
+    }
+    if (user_voice_channel(msg.author.id) != channel_id) {
       error = "Join my voice channel to control playback.";
       return false;
     }
@@ -683,22 +1009,23 @@ private:
     return false;
   }
 
-  bool connect_to_voice(stoatpp::cluster &bot, const std::string &channel_id,
-                        std::string &error) {
-    std::lock_guard<std::mutex> operation_lock(voice_operation_mutex_);
+  bool connect_to_voice(stoatpp::cluster &bot, const std::string &server_id,
+                        const std::string &channel_id, std::string &error) {
+    auto session = get_or_create_session(bot, server_id);
+    std::lock_guard<std::mutex> operation_lock(session->operation_mutex);
     {
-      std::lock_guard<std::mutex> lock(voice_mutex_);
-      if (current_channel_id_ == channel_id && voice_.is_connected())
+      std::lock_guard<std::mutex> lock(session->voice_mutex);
+      if (session->channel_id == channel_id && session->voice.is_connected())
         return true;
     }
 
-    music_->stop();
+    session->music->stop();
     std::string old_channel;
     {
-      std::lock_guard<std::mutex> lock(voice_mutex_);
-      old_channel = current_channel_id_;
-      voice_.disconnect();
-      current_channel_id_.clear();
+      std::lock_guard<std::mutex> lock(session->voice_mutex);
+      old_channel = session->channel_id;
+      session->voice.disconnect();
+      session->channel_id.clear();
     }
     if (!old_channel.empty())
       bot.ws().leave_voice_channel(old_channel);
@@ -743,9 +1070,9 @@ private:
     }
 
     {
-      std::lock_guard<std::mutex> lock(voice_mutex_);
-      if (!voice_.connect(url, token)) {
-        voice_.disconnect();
+      std::lock_guard<std::mutex> lock(session->voice_mutex);
+      if (!session->voice.connect(url, token)) {
+        session->voice.disconnect();
         error = "Could not establish the voice connection.";
         return false;
       }
@@ -756,33 +1083,25 @@ private:
                           std::chrono::seconds(15);
     while (std::chrono::steady_clock::now() < deadline) {
       {
-        std::lock_guard<std::mutex> lock(voice_mutex_);
-        connected = voice_.is_connected();
+        std::lock_guard<std::mutex> lock(session->voice_mutex);
+        connected = session->voice.is_connected();
       }
       if (connected)
         break;
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     if (!connected) {
-      std::lock_guard<std::mutex> lock(voice_mutex_);
-      voice_.disconnect();
+      std::lock_guard<std::mutex> lock(session->voice_mutex);
+      session->voice.disconnect();
       error = "The voice server did not finish connecting.";
       return false;
     }
 
     {
-      std::lock_guard<std::mutex> lock(voice_mutex_);
-      current_channel_id_ = channel_id;
+      std::lock_guard<std::mutex> lock(session->voice_mutex);
+      session->channel_id = channel_id;
     }
     bot.ws().join_voice_channel(channel_id);
-
-    {
-      std::lock_guard<std::mutex> lock(pulse_mutex_);
-      if (pulse_.is_initialized())
-        pulse_.shutdown();
-      pulse_.init("bronx-bot", "voice-stream");
-      pulse_.play_chime(true);
-    }
     return true;
   }
 
@@ -806,7 +1125,88 @@ private:
       host.resize(port);
     return host == "youtu.be" || host == "youtube.com" ||
            (host.size() > 12 &&
-            host.compare(host.size() - 12, 12, ".youtube.com") == 0);
+            host.compare(host.size() - 12, 12, ".youtube.com") == 0) ||
+           host == "soundcloud.com" || host == "on.soundcloud.com" ||
+           (host.size() > 15 &&
+            host.compare(host.size() - 15, 15, ".soundcloud.com") == 0);
+  }
+
+  void play_query(stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                  const std::string &query, bool prefer_soundcloud) {
+    if (msg.server_id.empty()) {
+      bot.send_message(msg.channel_id,
+                       "[Music] This command can only be used in a server.");
+      return;
+    }
+    std::cout << "[bronx music] " << (prefer_soundcloud ? ".sc" : ".play")
+              << " query=\"" << query << "\" user=" << msg.author.id
+              << " channel=" << msg.channel_id << std::endl;
+    launch_task(bot, msg.channel_id, [this, &bot, msg, query, prefer_soundcloud] {
+      const std::string caller_channel = user_voice_channel(msg.author.id);
+      std::string current_channel = active_channel_id(msg.server_id);
+      std::string error;
+      if (current_channel.empty()) {
+        if (caller_channel.empty()) {
+          bot.send_message(
+              msg.channel_id,
+              "[Music] Join a voice channel first, or use `.join <channel>`.");
+          return;
+        }
+        if (!connect_to_voice(bot, msg.server_id, caller_channel, error)) {
+          bot.send_message(msg.channel_id, "[Voice] " + error);
+          return;
+        }
+        current_channel = caller_channel;
+      } else if (caller_channel.empty() || caller_channel != current_channel) {
+        bot.send_message(
+            msg.channel_id,
+            "[Music] Join my current voice channel to control playback.");
+        return;
+      }
+      if (!voice_is_connected(msg.server_id) &&
+          !connect_to_voice(bot, msg.server_id, current_channel, error)) {
+        bot.send_message(msg.channel_id, "[Voice] " + error);
+        return;
+      }
+
+      bot.send_message(msg.channel_id,
+                       prefer_soundcloud ? "[Music] Searching SoundCloud..."
+                                         : "[Music] Searching...");
+      auto track = resolve_youtube(query, error, prefer_soundcloud);
+      if (!track) {
+        std::cerr << "[bronx music] resolve failed for \"" << query
+                  << "\": " << error << std::endl;
+        bot.send_message(msg.channel_id, "[Music] " + error);
+        return;
+      }
+      std::cout << "[bronx music] resolved \"" << track->title << "\" -> "
+                << track->url << " (duration=" << track->duration_seconds
+                << "s)" << std::endl;
+      if (active_channel_id(msg.server_id) != current_channel) {
+        bot.send_message(
+            msg.channel_id,
+            "[Music] The voice connection changed before the track was queued.");
+        return;
+      }
+
+      auto session = find_session(msg.server_id);
+      if (!session) {
+        bot.send_message(msg.channel_id,
+                         "[Music] Voice session is no longer active.");
+        return;
+      }
+      const std::string track_title = track->title;
+      size_t position = 0;
+      if (!session->music->enqueue(std::move(*track), msg.channel_id, position)) {
+        bot.send_message(msg.channel_id,
+                         "[Music] The queue is full or shutting down.");
+        return;
+      }
+      bot.send_message(msg.channel_id,
+                       "[Music] Added **" + track_title +
+                           "** to the queue at position " +
+                           std::to_string(position) + ".");
+    });
   }
 
   static bool capture_ytdlp_json(const std::string &target,
@@ -826,14 +1226,19 @@ private:
           posix_spawn_file_actions_adddup2(&actions, descriptors[1],
                                            STDOUT_FILENO);
     if (spawn_error == 0)
-      spawn_error = posix_spawn_file_actions_addopen(
-          &actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
-    if (spawn_error == 0)
       spawn_error = posix_spawn_file_actions_addclose(&actions, descriptors[0]);
     if (spawn_error == 0)
       spawn_error = posix_spawn_file_actions_addclose(&actions, descriptors[1]);
     pid_t child = -1;
     if (spawn_error == 0) {
+      std::string cookies_path;
+      if (const char *env_cookies = std::getenv("YTDLP_COOKIES_FILE")) {
+        if (*env_cookies && access(env_cookies, R_OK) == 0)
+          cookies_path = env_cookies;
+      } else if (access("/app/cookies.txt", R_OK) == 0) {
+        cookies_path = "/app/cookies.txt";
+      }
+
       std::vector<char *> argv = {
           const_cast<char *>("yt-dlp"),
           const_cast<char *>("--ignore-config"),
@@ -842,9 +1247,16 @@ private:
           const_cast<char *>("--quiet"),
           const_cast<char *>("--no-warnings"),
           const_cast<char *>("--skip-download"),
+          const_cast<char *>("--flat-playlist"),
           const_cast<char *>("--dump-single-json"),
-          const_cast<char *>("--no-playlist"), const_cast<char *>("--"),
-          const_cast<char *>(target.c_str()), nullptr};
+          const_cast<char *>("--no-playlist")};
+      if (!cookies_path.empty()) {
+        argv.push_back(const_cast<char *>("--cookies"));
+        argv.push_back(const_cast<char *>(cookies_path.c_str()));
+      }
+      argv.push_back(const_cast<char *>("--"));
+      argv.push_back(const_cast<char *>(target.c_str()));
+      argv.push_back(nullptr);
       spawn_error = posix_spawnp(&child, "yt-dlp", &actions, nullptr,
                                  argv.data(), environ);
     }
@@ -923,21 +1335,181 @@ private:
     return true;
   }
 
+  static std::string url_encode(const std::string &value) {
+    std::ostringstream escaped;
+    escaped.fill('0');
+    escaped << std::hex;
+    for (unsigned char c : value) {
+      if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+        escaped << c;
+      } else {
+        escaped << std::uppercase << '%' << std::setw(2)
+                << static_cast<int>(c) << std::nouppercase;
+      }
+    }
+    return escaped.str();
+  }
+
+  static double parse_duration_text(const std::string &text) {
+    if (text.empty())
+      return 0.0;
+    double total = 0.0;
+    size_t start = 0;
+    while (start < text.size()) {
+      size_t colon = text.find(':', start);
+      std::string part = (colon == std::string::npos)
+                             ? text.substr(start)
+                             : text.substr(start, colon - start);
+      if (part.empty())
+        return 0.0;
+      for (unsigned char c : part) {
+        if (!std::isdigit(c))
+          return 0.0;
+      }
+      total = total * 60.0 + std::stod(part);
+      if (colon == std::string::npos)
+        break;
+      start = colon + 1;
+    }
+    return total;
+  }
+
+  static const nlohmann::json *find_first_video_renderer(const nlohmann::json &node,
+                                                         int depth = 0) {
+    if (depth > 20)
+      return nullptr;
+    if (node.is_object()) {
+      auto it = node.find("videoRenderer");
+      if (it != node.end() && it->is_object())
+        return &(*it);
+      for (const auto &item : node.items()) {
+        if (const auto *found = find_first_video_renderer(item.value(), depth + 1))
+          return found;
+      }
+    } else if (node.is_array()) {
+      for (const auto &elem : node) {
+        if (const auto *found = find_first_video_renderer(elem, depth + 1))
+          return found;
+      }
+    }
+    return nullptr;
+  }
+
+  // Fast direct YouTube search (~300-700ms) avoiding yt-dlp Python startup.
+  static bool search_youtube_direct(const std::string &query,
+                                    VoiceMusicPlayer::Track &track) {
+    httplib::Client cli("https://www.youtube.com");
+    cli.set_connection_timeout(std::chrono::seconds(8));
+    cli.set_read_timeout(std::chrono::seconds(8));
+    cli.set_follow_location(true);
+
+    httplib::Headers headers = {
+        {"User-Agent",
+         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like "
+         "Gecko) Chrome/120.0.0.0 Safari/537.36"},
+        {"Accept-Language", "en-US,en;q=0.9"}};
+
+    // sp=EgIQAQ%3D%3D filters results to videos only.
+    const auto started = std::chrono::steady_clock::now();
+    auto res = cli.Get("/results?search_query=" + url_encode(query) +
+                           "&sp=EgIQAQ%3D%3D",
+                       headers);
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started)
+            .count();
+    if (!res || res->status != 200 || res->body.empty()) {
+      std::cerr << "[bronx music] direct search HTTP failed (" << elapsed_ms
+                << "ms, status=" << (res ? res->status : -1) << "), falling back to yt-dlp"
+                << std::endl;
+      return false;
+    }
+
+    const std::string marker = "var ytInitialData = ";
+    const size_t start = res->body.find(marker);
+    if (start == std::string::npos) {
+      std::cerr << "[bronx music] direct search missing ytInitialData ("
+                << elapsed_ms << "ms), falling back to yt-dlp" << std::endl;
+      return false;
+    }
+    const size_t json_start = start + marker.size();
+    const size_t end = res->body.find(";</script>", json_start);
+    if (end == std::string::npos) {
+      std::cerr << "[bronx music] direct search truncated ytInitialData ("
+                << elapsed_ms << "ms), falling back to yt-dlp" << std::endl;
+      return false;
+    }
+
+    auto data = nlohmann::json::parse(
+        res->body.substr(json_start, end - json_start), nullptr, false);
+    if (data.is_discarded()) {
+      std::cerr << "[bronx music] direct search JSON parse failed ("
+                << elapsed_ms << "ms), falling back to yt-dlp" << std::endl;
+      return false;
+    }
+
+    const nlohmann::json *vr = find_first_video_renderer(data);
+    if (!vr || !vr->contains("videoId") || !(*vr)["videoId"].is_string()) {
+      std::cerr << "[bronx music] direct search found no videoRenderer ("
+                << elapsed_ms << "ms), falling back to yt-dlp" << std::endl;
+      return false;
+    }
+
+    const std::string video_id = (*vr)["videoId"].get<std::string>();
+    if (video_id.empty())
+      return false;
+
+    std::string title;
+    if (vr->contains("title") && (*vr)["title"].is_object()) {
+      const auto &t = (*vr)["title"];
+      if (t.contains("runs") && t["runs"].is_array() && !t["runs"].empty() &&
+          t["runs"][0].is_object() && t["runs"][0].contains("text") &&
+          t["runs"][0]["text"].is_string()) {
+        title = t["runs"][0]["text"].get<std::string>();
+      } else if (t.contains("simpleText") && t["simpleText"].is_string()) {
+        title = t["simpleText"].get<std::string>();
+      }
+    }
+    if (title.empty())
+      return false;
+
+    track.title = title;
+    track.url = "https://www.youtube.com/watch?v=" + video_id;
+    if (vr->contains("lengthText") && (*vr)["lengthText"].is_object() &&
+        (*vr)["lengthText"].contains("simpleText") &&
+        (*vr)["lengthText"]["simpleText"].is_string()) {
+      track.duration_seconds =
+          parse_duration_text((*vr)["lengthText"]["simpleText"].get<std::string>());
+    }
+    return true;
+  }
+
   static std::optional<VoiceMusicPlayer::Track>
-  resolve_youtube(const std::string &query, std::string &error) {
+  resolve_youtube(const std::string &query, std::string &error,
+                  bool prefer_soundcloud = false) {
     std::string target = query;
     if (query.rfind("http://", 0) == 0 ||
         query.rfind("https://", 0) == 0) {
       if (!supported_youtube_url(query)) {
-        error = "Only YouTube video URLs are supported right now.";
+        error = "Only YouTube and SoundCloud URLs are supported right now.";
         return std::nullopt;
       }
     } else {
       if (query.find("://") != std::string::npos) {
-        error = "Only YouTube video URLs or search terms are supported.";
+        error = "Only YouTube/SoundCloud URLs or search terms are supported.";
         return std::nullopt;
       }
-      target = "ytsearch1:" + query;
+      if (prefer_soundcloud) {
+        target = "scsearch1:" + query;
+      } else if (query.rfind("sc:", 0) == 0 && query.size() > 3) {
+        target = "scsearch1:" + query.substr(3);
+      } else {
+        VoiceMusicPlayer::Track direct_track;
+        if (search_youtube_direct(query, direct_track)) {
+          return direct_track;
+        }
+        target = "ytsearch1:" + query;
+      }
     }
 
     std::string json_text;
@@ -966,6 +1538,10 @@ private:
       else if (json.contains("original_url") &&
                json["original_url"].is_string())
         track.url = json["original_url"].get<std::string>();
+      else if (json.contains("url") && json["url"].is_string())
+        track.url = json["url"].get<std::string>();
+      else if (json.contains("id") && json["id"].is_string())
+        track.url = "https://www.youtube.com/watch?v=" + json["id"].get<std::string>();
       if (track.title.empty() || !supported_youtube_url(track.url)) {
         error = "YouTube returned an invalid video URL.";
         return std::nullopt;
@@ -981,14 +1557,11 @@ private:
   }
 
   stoatpp::pulse_voice_client pulse_;
-  stoatpp::voice_connection voice_;
-  std::unique_ptr<VoiceMusicPlayer> music_;
-  mutable std::mutex voice_mutex_;
-  std::mutex voice_operation_mutex_;
   std::mutex pulse_mutex_;
+  mutable std::mutex sessions_mutex_;
+  std::unordered_map<std::string, std::shared_ptr<ServerVoiceSession>> sessions_;
   mutable std::mutex voice_state_mutex_;
   std::unordered_map<std::string, std::string> user_voice_channels_;
-  std::string current_channel_id_;
   std::mutex async_mutex_;
   std::vector<AsyncTask> async_tasks_;
 };
