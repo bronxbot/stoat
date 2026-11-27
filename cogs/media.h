@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 #include <tesseract/baseapi.h>
 #include <leptonica/allheaders.h>
+#include "image_ops.h"
 
 namespace bronx::cogs {
 
@@ -529,24 +530,10 @@ public:
                 }
                 
                 auto run_gif = [&bot, msg, target_url]() {
-                    std::string final_url = target_url;
-                    
-                    if (final_url.empty()) {
-                        if (!msg.replies.empty()) {
-                            auto res = bot.rest().get_message(msg.channel_id, msg.replies[0]);
-                            if (res.success()) {
-                                auto replied_msg = stoatpp::models::Message::from_json(res.body);
-                                final_url = resolve_message_media_url(bot, replied_msg);
-                            }
-                        }
-                    }
-                    
-                    if (final_url.empty()) {
-                        final_url = resolve_message_media_url(bot, msg);
-                    }
+                    std::string final_url = image_ops::resolve_image_url(bot, msg, target_url);
                     
                     if (final_url.empty() || final_url.find("http") == std::string::npos) {
-                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " please provide a valid media URL or reply to a message containing one.");
+                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " no media found (attach, reply, paste a URL, or send one in chat first).");
                         return;
                     }
                     
@@ -560,7 +547,7 @@ public:
                     std::string temp_dir = "/tmp/bronx_gif_" + id;
                     std::filesystem::create_directories(temp_dir);
                     
-                    std::string in_path = temp_dir + "/input.mp4";
+                    std::string in_path = temp_dir + "/input";
                     std::string out_path = temp_dir + "/output.gif";
                     
                     if (!download_file_system(final_url, in_path)) {
@@ -572,9 +559,13 @@ public:
                     std::string escaped_in = shell_escape(in_path);
                     std::string escaped_out = shell_escape(out_path);
                     
-                    // Run FFMPEG to convert video to GIF (10s limit, 320p width, 12fps, bayer dithering)
-                    std::string cmd = "/usr/bin/ffmpeg -y -i " + escaped_in + " -t 10 -vf \"fps=12,scale=320:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse=dither=bayer:bayer_scale=1\" " + escaped_out + " >/dev/null 2>&1";
+                    // Run FFMPEG to convert video/media to GIF, falling back to ImageMagick for static images (PNG/JPG/WEBP)
+                    std::string cmd = "/usr/bin/ffmpeg -y -i " + escaped_in + " -t 10 -vf \"fps=12,scale=320:-2:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse=dither=bayer:bayer_scale=1\" " + escaped_out + " >/dev/null 2>&1";
                     int status = std::system(cmd.c_str());
+                    if (status != 0 || !std::filesystem::exists(out_path) || std::filesystem::file_size(out_path) == 0) {
+                        std::string im_cmd = "/usr/bin/convert -limit memory 256MiB -limit map 512MiB " + escaped_in + " -coalesce -resize '480x480>' -layers Optimize " + escaped_out + " >/dev/null 2>&1";
+                        status = std::system(im_cmd.c_str());
+                    }
                     
                     if (status != 0 || !std::filesystem::exists(out_path) || std::filesystem::file_size(out_path) == 0) {
                         bot.send_message(msg.channel_id, "" + bronx::emj_no + " failed to convert media to GIF. Check if it's a valid video/image.");
@@ -675,6 +666,7 @@ public:
             "Utility"
         });
 
+        bronx::cogs::image_ops::register_image_commands(bot);
     }
 };
 

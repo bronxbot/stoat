@@ -2663,7 +2663,97 @@ public:
             },
             "Moderation",
             stoatpp::permissions::BanMembers
-        });        // Register on_message_react for modlogs pagination
+        });
+
+        bot.register_command({
+            "nick",
+            {"nickname"},
+            "change or clear a member's server nickname.",
+            "",
+            {"<@user|id>", "[nickname|clear]"},
+            [](stoatpp::cluster& bot, const stoatpp::events::Message& msg, const std::vector<std::string>& args) {
+                if (msg.server_id.empty()) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_no + " this command can only be used in a server.");
+                    return;
+                }
+                if (args.empty()) {
+                    bot.send_message(msg.channel_id, "usage: `" + msg.prefix + "nick <@user|id> [nickname|clear]`");
+                    return;
+                }
+
+                std::string query = args[0];
+                std::string new_nick;
+                for (size_t i = 1; i < args.size(); ++i) {
+                    if (i > 1) new_nick += ' ';
+                    new_nick += args[i];
+                }
+
+                std::string lower_nick = new_nick;
+                std::transform(lower_nick.begin(), lower_nick.end(), lower_nick.begin(), ::tolower);
+                bool clear_nick = args.size() == 1 || lower_nick == "clear" || lower_nick == "reset" || lower_nick == "none";
+
+                if (!clear_nick && new_nick.size() > 32) {
+                    bot.send_message(msg.channel_id, "" + bronx::emj_warning + " nickname must be 32 characters or fewer.");
+                    return;
+                }
+
+                helpers::resolve_user(bot, msg.server_id, query, [&bot, msg, new_nick, clear_nick](stoatpp::models::User target_user, stoatpp::models::Member target_member, bool success) {
+                    if (!success) {
+                        bot.send_message(msg.channel_id, "" + bronx::emj_no + " could not resolve target user.");
+                        return;
+                    }
+
+                    bot.fetch_member(msg.server_id, msg.author.id, [&bot, msg, target_user, target_member, new_nick, clear_nick](stoatpp::models::Member exec_member, bool exec_ok) {
+                        if (!exec_ok) {
+                            bot.send_message(msg.channel_id, "" + bronx::emj_no + " failed to verify your member permissions.");
+                            return;
+                        }
+
+                        bot.fetch_member(msg.server_id, bot.current_user().id, [&bot, msg, target_user, target_member, exec_member, new_nick, clear_nick](stoatpp::models::Member bot_member, bool bot_ok) {
+                            if (!bot_ok) {
+                                bot.send_message(msg.channel_id, "" + bronx::emj_no + " failed to verify bot member permissions.");
+                                return;
+                            }
+
+                            if (!target_member.id.empty()) {
+                                if (target_user.id != msg.author.id && !helpers::check_hierarchy(bot, msg.server_id, exec_member, target_member)) {
+                                    bot.send_message(msg.channel_id, "" + bronx::emj_no + " hierarchy error: you cannot change this user's nickname.");
+                                    return;
+                                }
+                                if (target_user.id != bot.current_user().id && !helpers::check_hierarchy(bot, msg.server_id, bot_member, target_member)) {
+                                    bot.send_message(msg.channel_id, "" + bronx::emj_no + " hierarchy error: my role is not high enough to change this user's nickname.");
+                                    return;
+                                }
+                            }
+
+                            nlohmann::json edit_fields;
+                            if (clear_nick) {
+                                edit_fields["remove"] = nlohmann::json::array({"Nickname"});
+                            } else {
+                                edit_fields["nickname"] = new_nick;
+                            }
+
+                            auto res = bot.rest().edit_member(msg.server_id, target_user.id, edit_fields);
+                            if (res.success()) {
+                                if (clear_nick) {
+                                    log_moderation_action(bot, msg.server_id, "Nickname", msg.author.id, target_user.id, "Cleared nickname", "", msg.channel_id);
+                                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " cleared nickname for **" + target_user.username + "**.");
+                                } else {
+                                    log_moderation_action(bot, msg.server_id, "Nickname", msg.author.id, target_user.id, "Set nickname to " + new_nick, "", msg.channel_id);
+                                    bot.send_message(msg.channel_id, "" + bronx::emj_yes + " changed **" + target_user.username + "**'s nickname to **" + new_nick + "**.");
+                                }
+                            } else {
+                                bot.send_message(msg.channel_id, "" + bronx::emj_no + " failed to update nickname. do i have Manage Nicknames permission?");
+                            }
+                        });
+                    });
+                });
+            },
+            "Moderation",
+            stoatpp::permissions::ManageNicknames
+        });
+
+        // Register on_message_react for modlogs pagination
         bot.on_message_react([this, &bot](const stoatpp::events::MessageReact& e) {
             if (e.user_id == bot.current_user().id)
                 return;
