@@ -638,9 +638,15 @@ inline bool apply_effect(const std::string &effect, const std::string &in_path,
   return false;
 }
 
+struct OutputFile {
+  std::string path;
+  bool is_gif = false;
+  bool spoiler = false;
+};
+
 inline void upload_and_send_many(
     stoatpp::cluster &bot, const std::string &channel_id,
-    const std::vector<std::pair<std::string, bool>> &files,
+    const std::vector<OutputFile> &files,
     const std::string &caption_msg = "") {
   stoatpp::models::MessagePayload payload;
   if (!caption_msg.empty())
@@ -648,19 +654,20 @@ inline void upload_and_send_many(
 
   int attached = 0;
   for (size_t i = 0; i < files.size(); ++i) {
-    const auto &[file_path, is_gif] = files[i];
-    if (!std::filesystem::exists(file_path) ||
-        std::filesystem::file_size(file_path) == 0) {
+    const auto &file = files[i];
+    if (!std::filesystem::exists(file.path) ||
+        std::filesystem::file_size(file.path) == 0) {
       continue;
     }
-    std::ifstream f(file_path, std::ios::binary);
+    std::ifstream f(file.path, std::ios::binary);
     std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
                               std::istreambuf_iterator<char>());
     f.close();
 
     std::string fname =
-        "result_" + std::to_string(i + 1) + (is_gif ? ".gif" : ".png");
-    std::string mime = is_gif ? "image/gif" : "image/png";
+        std::string(file.spoiler ? "SPOILER_" : "") + "result_" +
+        std::to_string(i + 1) + (file.is_gif ? ".gif" : ".png");
+    std::string mime = file.is_gif ? "image/gif" : "image/png";
     auto up_res = bot.rest().upload_file("/attachments", fname, data, mime);
     if (up_res.success() && up_res.body.contains("id") &&
         up_res.body["id"].is_string()) {
@@ -680,8 +687,10 @@ inline void upload_and_send_many(
 inline void upload_and_send(stoatpp::cluster &bot,
                             const std::string &channel_id,
                             const std::string &file_path, bool is_gif,
-                            const std::string &caption_msg = "") {
-  upload_and_send_many(bot, channel_id, {{file_path, is_gif}}, caption_msg);
+                            const std::string &caption_msg = "",
+                            bool spoiler = false) {
+  upload_and_send_many(bot, channel_id, {{file_path, is_gif, spoiler}},
+                       caption_msg);
 }
 
 inline void register_image_commands(stoatpp::cluster &bot) {
@@ -699,7 +708,8 @@ inline void register_image_commands(stoatpp::cluster &bot) {
            std::string explicit_url;
            std::string extra_arg;
            for (const auto &a : args) {
-             if (explicit_url.empty() && a.rfind("http", 0) == 0)
+             if (explicit_url.empty() &&
+                 (a.rfind("http", 0) == 0 || a.rfind("!!http", 0) == 0))
                explicit_url = a;
              else if (!extract_emoji_urls(bot, a).empty())
                explicit_url += (explicit_url.empty() ? "" : " ") + a;
@@ -708,8 +718,8 @@ inline void register_image_commands(stoatpp::cluster &bot) {
            }
 
            std::thread([&bot, msg, name, explicit_url, extra_arg]() {
-             auto urls = resolve_image_urls(bot, msg, explicit_url);
-             if (urls.empty()) {
+             auto items = resolve_image_items(bot, msg, explicit_url);
+             if (items.empty()) {
                bot.send_message(
                    msg.channel_id,
                    "" + bronx::emj_no +
@@ -723,10 +733,10 @@ inline void register_image_commands(stoatpp::cluster &bot) {
                  "/tmp/bronx_img_" + std::to_string(rd());
              std::filesystem::create_directories(temp_dir);
 
-             std::vector<std::pair<std::string, bool>> outputs;
-             for (size_t idx = 0; idx < urls.size(); ++idx) {
+             std::vector<OutputFile> outputs;
+             for (size_t idx = 0; idx < items.size(); ++idx) {
                std::string in_path = temp_dir + "/input_" + std::to_string(idx);
-               if (!download_file_system(urls[idx], in_path))
+               if (!download_file_system(items[idx].url, in_path))
                  continue;
 
                bool is_gif = detect_animated_gif(in_path);
@@ -736,7 +746,7 @@ inline void register_image_commands(stoatpp::cluster &bot) {
                                       (will_be_gif ? ".gif" : ".png");
                if (apply_effect(name, in_path, is_gif, temp_dir, out_path,
                                 extra_arg)) {
-                 outputs.emplace_back(out_path, is_gif);
+                 outputs.push_back({out_path, is_gif, items[idx].spoiler});
                }
              }
 
@@ -818,8 +828,8 @@ inline void register_image_commands(stoatpp::cluster &bot) {
          }
 
          std::thread([&bot, msg, explicit_url, text]() {
-           auto urls = resolve_image_urls(bot, msg, explicit_url);
-           if (urls.empty()) {
+           auto items = resolve_image_items(bot, msg, explicit_url);
+           if (items.empty()) {
              bot.send_message(msg.channel_id,
                               "" + bronx::emj_no + " no image found.");
              return;
@@ -830,17 +840,17 @@ inline void register_image_commands(stoatpp::cluster &bot) {
            std::string temp_dir = "/tmp/bronx_img_" + std::to_string(rd());
            std::filesystem::create_directories(temp_dir);
 
-           std::vector<std::pair<std::string, bool>> outputs;
-           for (size_t idx = 0; idx < urls.size(); ++idx) {
+           std::vector<OutputFile> outputs;
+           for (size_t idx = 0; idx < items.size(); ++idx) {
              std::string in_path = temp_dir + "/input_" + std::to_string(idx);
-             if (!download_file_system(urls[idx], in_path))
+             if (!download_file_system(items[idx].url, in_path))
                continue;
 
              bool is_gif = detect_animated_gif(in_path);
              std::string out_path = temp_dir + "/out_" + std::to_string(idx) +
                                     (is_gif ? ".gif" : ".png");
              if (apply_caption(in_path, is_gif, text, temp_dir, out_path)) {
-               outputs.emplace_back(out_path, is_gif);
+               outputs.push_back({out_path, is_gif, items[idx].spoiler});
              }
            }
 
@@ -909,8 +919,8 @@ inline void register_image_commands(stoatpp::cluster &bot) {
          trim(bottom_text);
 
          std::thread([&bot, msg, explicit_url, top_text, bottom_text]() {
-           auto urls = resolve_image_urls(bot, msg, explicit_url);
-           if (urls.empty()) {
+           auto items = resolve_image_items(bot, msg, explicit_url);
+           if (items.empty()) {
              bot.send_message(msg.channel_id,
                               "" + bronx::emj_no + " no image found.");
              return;
@@ -921,17 +931,17 @@ inline void register_image_commands(stoatpp::cluster &bot) {
            std::string temp_dir = "/tmp/bronx_img_" + std::to_string(rd());
            std::filesystem::create_directories(temp_dir);
 
-           std::vector<std::pair<std::string, bool>> outputs;
-           for (size_t idx = 0; idx < urls.size(); ++idx) {
+           std::vector<OutputFile> outputs;
+           for (size_t idx = 0; idx < items.size(); ++idx) {
              std::string in_path = temp_dir + "/input_" + std::to_string(idx);
-             if (!download_file_system(urls[idx], in_path))
+             if (!download_file_system(items[idx].url, in_path))
                continue;
 
              bool is_gif = detect_animated_gif(in_path);
              std::string out_path = temp_dir + "/out_" + std::to_string(idx) +
                                     (is_gif ? ".gif" : ".png");
              if (apply_meme(in_path, is_gif, top_text, bottom_text, out_path)) {
-               outputs.emplace_back(out_path, is_gif);
+               outputs.push_back({out_path, is_gif, items[idx].spoiler});
              }
            }
 
@@ -968,8 +978,8 @@ inline void register_image_commands(stoatpp::cluster &bot) {
          }
 
          std::thread([&bot, msg, explicit_url]() {
-           auto urls = resolve_image_urls(bot, msg, explicit_url);
-           if (urls.empty()) {
+           auto items = resolve_image_items(bot, msg, explicit_url);
+           if (items.empty()) {
              bot.send_message(
                  msg.channel_id,
                  "" + bronx::emj_no +
@@ -1000,12 +1010,12 @@ inline void register_image_commands(stoatpp::cluster &bot) {
                                    return fx != "rgb" && fx != "spin";
                                  });
 
-           std::vector<std::pair<std::string, bool>> outputs;
+           std::vector<OutputFile> outputs;
            std::vector<std::string> applied_summary;
 
-           for (size_t idx = 0; idx < urls.size(); ++idx) {
+           for (size_t idx = 0; idx < items.size(); ++idx) {
              std::string cur_path = temp_dir + "/img" + std::to_string(idx) + "_0";
-             if (!download_file_system(urls[idx], cur_path))
+             if (!download_file_system(items[idx].url, cur_path))
                continue;
 
              bool is_gif = detect_animated_gif(cur_path);
@@ -1022,7 +1032,7 @@ inline void register_image_commands(stoatpp::cluster &bot) {
                }
              }
              if (!applied.empty()) {
-               outputs.emplace_back(cur_path, is_gif);
+               outputs.push_back({cur_path, is_gif, items[idx].spoiler});
                if (applied_summary.empty())
                  applied_summary = applied;
              }

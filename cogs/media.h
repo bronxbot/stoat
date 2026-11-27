@@ -45,7 +45,7 @@ inline std::string find_url(const std::string& text) {
     }
     if (pos == std::string::npos) return "";
     
-    size_t end = text.find_first_of(" \n\r\t<>[]()", pos);
+    size_t end = text.find_first_of(" \n\r\t<>[]()!", pos);
     if (end == std::string::npos) {
         return text.substr(pos);
     }
