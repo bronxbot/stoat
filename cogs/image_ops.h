@@ -230,10 +230,11 @@ inline bool get_image_dimensions(const std::string &path, int &w, int &h) {
 
 inline int run_convert(const std::string &in_path, bool is_gif,
                        const std::string &ops, const std::string &out_path) {
+  std::string resize_cap = is_gif ? "-resize '320x320>' " : "-resize '512x512>' ";
   std::string cmd =
       "/usr/bin/convert -limit memory 256MiB -limit map 512MiB " +
       shell_escape(in_path) + (is_gif ? " -coalesce " : " ") +
-      "-resize '800x800>' " + ops + (is_gif ? " -layers Optimize " : " ") +
+      resize_cap + ops + (is_gif ? " -layers OptimizeFrame " : " ") +
       shell_escape(out_path) + " >/dev/null 2>&1";
   return std::system(cmd.c_str());
 }
@@ -507,7 +508,9 @@ inline bool apply_effect(const std::string &effect, const std::string &in_path,
                        out_path) == 0;
   }
   if (effect == "magik") {
-    return run_convert(in_path, is_gif, "-liquid-rescale 50%x50%! -resize 200%",
+    std::string cap = is_gif ? "-resize '240x240>' " : "";
+    return run_convert(in_path, is_gif,
+                       cap + "-liquid-rescale 50%x50%! -resize 200%",
                        out_path) == 0;
   }
   if (effect == "stretch") {
@@ -524,10 +527,10 @@ inline bool apply_effect(const std::string &effect, const std::string &in_path,
   }
   if (effect == "rgb") {
     std::string input_flags =
-        is_gif ? "-stream_loop -1 -t 2.5 -i " : "-loop 1 -t 2.5 -i ";
+        is_gif ? "-stream_loop -1 -t 2.0 -i " : "-loop 1 -t 2.0 -i ";
     std::string cmd =
         "/usr/bin/ffmpeg -y " + input_flags + shell_escape(in_path) +
-        " -vf \"scale='min(400,iw)':-2,hue=H=2*PI*t/2.5:s=1.5,fps=15,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse\" " +
+        " -vf \"scale='min(256,iw)':-2,hue=H=2*PI*t/2.0:s=1.5,fps=12,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse\" " +
         shell_escape(out_path) + " >/dev/null 2>&1";
     if (std::system(cmd.c_str()) == 0) {
       is_gif = true;
@@ -537,10 +540,10 @@ inline bool apply_effect(const std::string &effect, const std::string &in_path,
   }
   if (effect == "spin") {
     std::string input_flags =
-        is_gif ? "-stream_loop -1 -t 2 -i " : "-loop 1 -t 2 -i ";
+        is_gif ? "-stream_loop -1 -t 1.8 -i " : "-loop 1 -t 1.8 -i ";
     std::string cmd =
         "/usr/bin/ffmpeg -y " + input_flags + shell_escape(in_path) +
-        " -vf \"scale='min(320,iw)':-2,format=rgba,rotate=2*PI*t/2:fillcolor=none,fps=18,split[s0][s1];[s0]palettegen=reserve_transparent=on[p];[s1][p]paletteuse\" " +
+        " -vf \"scale='min(240,iw)':-2,format=rgba,rotate=2*PI*t/1.8:fillcolor=none,fps=12,split[s0][s1];[s0]palettegen=reserve_transparent=on[p];[s1][p]paletteuse\" " +
         shell_escape(out_path) + " >/dev/null 2>&1";
     if (std::system(cmd.c_str()) == 0) {
       is_gif = true;
@@ -891,6 +894,14 @@ inline void register_image_commands(stoatpp::cluster &bot) {
                "gloss",    "speechbubble", "rgb", "spin"};
            std::shuffle(pool.begin(), pool.end(), gen);
 
+           // Pick 3 effects and run any GIF-generating effect (rgb/spin) last
+           // so earlier static effects don't have to process every GIF frame.
+           std::vector<std::string> chosen(pool.begin(), pool.begin() + 3);
+           std::stable_partition(chosen.begin(), chosen.end(),
+                                 [](const std::string &fx) {
+                                   return fx != "rgb" && fx != "spin";
+                                 });
+
            std::vector<std::pair<std::string, bool>> outputs;
            std::vector<std::string> applied_summary;
 
@@ -901,8 +912,8 @@ inline void register_image_commands(stoatpp::cluster &bot) {
 
              bool is_gif = detect_animated_gif(cur_path);
              std::vector<std::string> applied;
-             for (size_t i = 0; i < pool.size() && applied.size() < 3; ++i) {
-               const std::string &fx = pool[i];
+             for (size_t i = 0; i < chosen.size(); ++i) {
+               const std::string &fx = chosen[i];
                bool next_gif = is_gif || fx == "rgb" || fx == "spin";
                std::string next_path = temp_dir + "/img" + std::to_string(idx) +
                                        "_" + std::to_string(applied.size() + 1) +
