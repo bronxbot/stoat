@@ -11,6 +11,7 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <random>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -57,10 +58,52 @@ inline std::string escape_im_text(const std::string &s) {
   return out;
 }
 
-inline std::vector<std::string>
-resolve_all_from_message_full(stoatpp::cluster &bot,
-                              const stoatpp::models::Message &m) {
+struct MediaItem {
+  std::string url;
+  bool spoiler = false;
+};
+
+inline bool text_has_spoiler_token(const std::string &text,
+                                   const std::string &needle) {
+  if (needle.empty())
+    return false;
+  size_t pos = text.find(needle);
+  if (pos == std::string::npos)
+    return false;
+  return pos >= 2 && text.substr(pos - 2, 2) == "!!";
+}
+
+inline std::vector<MediaItem> extract_emoji_items(stoatpp::cluster &bot,
+                                                  const std::string &text) {
+  std::vector<MediaItem> items;
+  static const std::regex emoji_re(
+      R"((?:<a?:[a-zA-Z0-9_]{1,32}:([0-9a-zA-Z]{26})>|:([0-9a-zA-Z]{26}):))");
+  auto begin = std::sregex_iterator(text.begin(), text.end(), emoji_re);
+  auto end = std::sregex_iterator();
+  for (auto it = begin; it != end && items.size() < 5; ++it) {
+    std::string id =
+        (*it)[1].matched ? (*it)[1].str() : (*it)[2].str();
+    if (!id.empty()) {
+      bool sp = it->position() >= 2 &&
+                text.substr(static_cast<size_t>(it->position()) - 2, 2) == "!!";
+      items.push_back({bot.config().cdn_url + "/emojis/" + id, sp});
+    }
+  }
+  return items;
+}
+
+inline std::vector<std::string> extract_emoji_urls(stoatpp::cluster &bot,
+                                                  const std::string &text) {
   std::vector<std::string> urls;
+  for (const auto &it : extract_emoji_items(bot, text))
+    urls.push_back(it.url);
+  return urls;
+}
+
+inline std::vector<MediaItem>
+resolve_all_items_from_message(stoatpp::cluster &bot,
+                               const stoatpp::models::Message &m) {
+  std::vector<MediaItem> items;
   if (m.attachments.is_array()) {
     for (const auto &att : m.attachments) {
       std::string tag = att.value("tag", "");
@@ -69,8 +112,10 @@ resolve_all_from_message_full(stoatpp::cluster &bot,
         id = att.value("_id", "");
       std::string filename = att.value("filename", "");
       if (!tag.empty() && !id.empty()) {
-        urls.push_back(bot.config().cdn_url + "/" + tag + "/" + id + "/" +
-                       filename);
+        bool sp = filename.rfind("SPOILER_", 0) == 0;
+        items.push_back({bot.config().cdn_url + "/" + tag + "/" + id + "/" +
+                             filename,
+                         sp});
       }
     }
   }
@@ -79,49 +124,65 @@ resolve_all_from_message_full(stoatpp::cluster &bot,
       if (emb.contains("image") && emb["image"].is_object()) {
         std::string u = emb["image"].value("url", "");
         if (!u.empty())
-          urls.push_back(u);
+          items.push_back({u, m.content && text_has_spoiler_token(*m.content, u)});
       }
       if (emb.contains("media") && emb["media"].is_object()) {
         std::string u = emb["media"].value("url", "");
         if (!u.empty())
-          urls.push_back(u);
+          items.push_back({u, m.content && text_has_spoiler_token(*m.content, u)});
       }
       if (emb.contains("icon_url") && emb["icon_url"].is_string()) {
         std::string u = emb["icon_url"].get<std::string>();
         if (!u.empty())
-          urls.push_back(u);
+          items.push_back({u, false});
       }
     }
   }
-  if (urls.empty() && m.content) {
+  if (items.empty() && m.content) {
     std::string u = find_url(*m.content);
-    if (!u.empty())
-      urls.push_back(u);
+    if (!u.empty()) {
+      items.push_back({u, text_has_spoiler_token(*m.content, u)});
+    } else {
+      auto emj = extract_emoji_items(bot, *m.content);
+      items.insert(items.end(), emj.begin(), emj.end());
+    }
   }
-  return urls;
+  return items;
 }
 
-inline std::vector<std::string>
-resolve_image_urls(stoatpp::cluster &bot, const stoatpp::events::Message &msg,
-                   const std::string &explicit_url = "") {
-  std::vector<std::string> urls;
-  if (!explicit_url.empty() && explicit_url.rfind("http", 0) == 0) {
-    urls.push_back(explicit_url);
-    return urls;
+inline std::vector<MediaItem>
+resolve_image_items(stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                    const std::string &explicit_url = "") {
+  std::vector<MediaItem> items;
+  if (!explicit_url.empty()) {
+    std::string clean = explicit_url;
+    bool sp = false;
+    if (clean.size() >= 4 && clean.rfind("!!", 0) == 0 &&
+        clean.compare(clean.size() - 2, 2, "!!") == 0) {
+      sp = true;
+      clean = clean.substr(2, clean.size() - 4);
+    }
+    if (clean.rfind("http", 0) == 0) {
+      items.push_back({clean, sp || text_has_spoiler_token(msg.content, clean)});
+      return items;
+    }
+    auto emj = extract_emoji_items(bot, explicit_url);
+    if (!emj.empty())
+      return emj;
   }
 
   for (const auto &reply_id : msg.replies) {
     auto res = bot.rest().get_message(msg.channel_id, reply_id);
     if (res.success()) {
       auto replied = stoatpp::models::Message::from_json(res.body);
-      auto found = resolve_all_from_message_full(bot, replied);
-      urls.insert(urls.end(), found.begin(), found.end());
+      auto found = resolve_all_items_from_message(bot, replied);
+      items.insert(items.end(), found.begin(), found.end());
     }
   }
-  if (!urls.empty()) {
-    if (urls.size() > 5)
-      urls.resize(5);
-    return urls;
+  if (!items.empty()) {
+    if (items.size() > 5)
+      items.resize(5);
+    return items;
   }
 
   if (msg.raw.contains("attachments") && msg.raw["attachments"].is_array()) {
@@ -132,20 +193,26 @@ resolve_image_urls(stoatpp::cluster &bot, const stoatpp::events::Message &msg,
         id = att.value("_id", "");
       std::string filename = att.value("filename", "");
       if (!tag.empty() && !id.empty()) {
-        urls.push_back(bot.config().cdn_url + "/" + tag + "/" + id + "/" +
-                       filename);
+        bool sp = filename.rfind("SPOILER_", 0) == 0;
+        items.push_back({bot.config().cdn_url + "/" + tag + "/" + id + "/" +
+                             filename,
+                         sp});
       }
     }
   }
-  if (urls.empty()) {
+  if (items.empty()) {
     std::string u = find_url(msg.content);
-    if (!u.empty())
-      urls.push_back(u);
+    if (!u.empty()) {
+      items.push_back({u, text_has_spoiler_token(msg.content, u)});
+    } else {
+      auto emj = extract_emoji_items(bot, msg.content);
+      items.insert(items.end(), emj.begin(), emj.end());
+    }
   }
-  if (!urls.empty()) {
-    if (urls.size() > 5)
-      urls.resize(5);
-    return urls;
+  if (!items.empty()) {
+    if (items.size() > 5)
+      items.resize(5);
+    return items;
   }
 
   // Fallback: scan recent channel messages (Assyst-style)
@@ -166,7 +233,7 @@ resolve_image_urls(stoatpp::cluster &bot, const stoatpp::events::Message &msg,
         auto m = stoatpp::models::Message::from_json(item);
         if (m.id == msg.id)
           continue;
-        auto found = resolve_all_from_message_full(bot, m);
+        auto found = resolve_all_items_from_message(bot, m);
         if (!found.empty()) {
           if (found.size() > 5)
             found.resize(5);
@@ -175,6 +242,15 @@ resolve_image_urls(stoatpp::cluster &bot, const stoatpp::events::Message &msg,
       }
     }
   }
+  return items;
+}
+
+inline std::vector<std::string>
+resolve_image_urls(stoatpp::cluster &bot, const stoatpp::events::Message &msg,
+                   const std::string &explicit_url = "") {
+  std::vector<std::string> urls;
+  for (const auto &it : resolve_image_items(bot, msg, explicit_url))
+    urls.push_back(it.url);
   return urls;
 }
 
@@ -519,6 +595,14 @@ inline bool apply_effect(const std::string &effect, const std::string &in_path,
   if (effect == "squish") {
     return run_convert(in_path, is_gif, "-resize 60%x160%!", out_path) == 0;
   }
+  if (effect == "enlarge") {
+    std::string cmd =
+        "/usr/bin/convert -limit memory 256MiB -limit map 512MiB " +
+        shell_escape(in_path) + (is_gif ? " -coalesce " : " ") +
+        "-resize 512x512" + (is_gif ? " -layers OptimizeFrame " : " ") +
+        shell_escape(out_path) + " >/dev/null 2>&1";
+    return std::system(cmd.c_str()) == 0;
+  }
   if (effect == "gloss" || effect == "shiny") {
     return apply_gloss(in_path, is_gif, temp_dir, out_path);
   }
@@ -617,6 +701,8 @@ inline void register_image_commands(stoatpp::cluster &bot) {
            for (const auto &a : args) {
              if (explicit_url.empty() && a.rfind("http", 0) == 0)
                explicit_url = a;
+             else if (!extract_emoji_urls(bot, a).empty())
+               explicit_url += (explicit_url.empty() ? "" : " ") + a;
              else if (extra_arg.empty())
                extra_arg = a;
            }
@@ -698,6 +784,7 @@ inline void register_image_commands(stoatpp::cluster &bot) {
   register_simple("speechbubble", {"sb"}, "Cut a speech bubble out of the top of an image.");
   register_simple("rgb", {"rainbow"}, "Animate rainbow hue cycling as a GIF.");
   register_simple("spin", {}, "Spin an image as an animated GIF.");
+  register_simple("enlarge", {"e"}, "Enlarge an emoji or image.");
 
   // White rectangle + black text caption (Assyst/iFunny style)
   bot.register_command(
@@ -718,6 +805,8 @@ inline void register_image_commands(stoatpp::cluster &bot) {
          for (const auto &a : args) {
            if (explicit_url.empty() && a.rfind("http", 0) == 0)
              explicit_url = a;
+           else if (!extract_emoji_urls(bot, a).empty())
+             explicit_url += (explicit_url.empty() ? "" : " ") + a;
            else
              text_parts.push_back(a);
          }
@@ -788,6 +877,8 @@ inline void register_image_commands(stoatpp::cluster &bot) {
          for (const auto &a : args) {
            if (explicit_url.empty() && a.rfind("http", 0) == 0)
              explicit_url = a;
+           else if (!extract_emoji_urls(bot, a).empty())
+             explicit_url += (explicit_url.empty() ? "" : " ") + a;
            else
              text_parts.push_back(a);
          }
@@ -866,8 +957,15 @@ inline void register_image_commands(stoatpp::cluster &bot) {
        {"[url]"},
        [](stoatpp::cluster &bot, const stoatpp::events::Message &msg,
           const std::vector<std::string> &args) {
-         std::string explicit_url =
-             (!args.empty() && args[0].rfind("http", 0) == 0) ? args[0] : "";
+         std::string explicit_url = "";
+         for (const auto &a : args) {
+           if (a.rfind("http", 0) == 0) {
+             explicit_url = a;
+             break;
+           }
+           if (!extract_emoji_urls(bot, a).empty())
+             explicit_url += (explicit_url.empty() ? "" : " ") + a;
+         }
 
          std::thread([&bot, msg, explicit_url]() {
            auto urls = resolve_image_urls(bot, msg, explicit_url);
